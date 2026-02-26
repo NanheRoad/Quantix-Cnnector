@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dash import html
 
+from frontend.time_utils import format_timestamp
+
 
 def device_card(device: dict) -> html.Div:
     runtime = device.get("runtime", {})
@@ -9,7 +11,7 @@ def device_card(device: dict) -> html.Div:
     color = {"online": "#2e7d32", "offline": "#616161", "error": "#c62828"}.get(status, "#616161")
     weight = runtime.get("weight")
     unit = runtime.get("unit", "kg")
-    ts = runtime.get("timestamp") or "-"
+    ts = format_timestamp(runtime.get("timestamp"))
 
     return html.Div(
         [

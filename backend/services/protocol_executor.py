@@ -15,7 +15,20 @@ SAFE_FUNCTIONS = {
     "round": round,
     "min": min,
     "max": max,
+    "len": len,
 }
+
+# 添加 JSON 解析支持
+def _json_loads(s: str) -> Any:
+    import json
+    return json.loads(s)
+
+def _json_get(obj: dict, key: str, default: Any = None) -> Any:
+    return obj.get(key, default)
+
+SAFE_FUNCTIONS["json.loads"] = _json_loads
+SAFE_FUNCTIONS["json.get"] = _json_get
+SAFE_FUNCTIONS["json.loads"] = _json_loads
 
 
 class ProtocolExecutor:
@@ -190,6 +203,9 @@ class ProtocolExecutor:
                 "coils": raw_result.get("coils", []) if isinstance(raw_result, dict) else [],
                 "payload": self._extract_payload(raw_result),
                 "steps": context.get("steps", {}),
+                "float": float,
+                "int": int,
+                "str": str,
             }
             names.update(context)
             return simple_eval(parse_config.get("expression", ""), names=names, functions=SAFE_FUNCTIONS)

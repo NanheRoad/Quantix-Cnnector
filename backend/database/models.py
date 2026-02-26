@@ -175,7 +175,11 @@ def system_templates() -> list[dict[str, Any]]:
                     "name": "处理接收到的消息",
                     "trigger": "event",
                     "action": "mqtt.on_message",
-                    "parse": {"type": "expression", "expression": "float(payload)"},
+                    "parse": {
+                        "type": "regex",
+                        "pattern": "\"weight\"\\s*:\\s*([-+]?[0-9]*\\.?[0-9]+)",
+                        "group": 1,
+                    },
                 },
                 "output": {"weight": "${message_handler.result}", "unit": "kg"},
             },
@@ -185,7 +189,7 @@ def system_templates() -> list[dict[str, Any]]:
 
 def seed_system_templates() -> None:
     for item in system_templates():
-        ProtocolTemplate.get_or_create(
+        row, created = ProtocolTemplate.get_or_create(
             name=item["name"],
             defaults={
                 "description": item["description"],
@@ -194,3 +198,31 @@ def seed_system_templates() -> None:
                 "is_system": True,
             },
         )
+
+        # Compatibility migration for legacy MQTT system template parse config.
+        if created or not row.is_system or row.protocol_type.lower() != "mqtt":
+            continue
+
+        template = row.template if isinstance(row.template, dict) else {}
+        message_handler = template.get("message_handler")
+        if not isinstance(message_handler, dict):
+            continue
+
+        parse_config = message_handler.get("parse")
+        if not isinstance(parse_config, dict):
+            continue
+        if parse_config.get("type") != "expression":
+            continue
+        if str(parse_config.get("expression", "")).strip() != "float(payload)":
+            continue
+
+        migrated_template = dict(template)
+        migrated_handler = dict(message_handler)
+        migrated_handler["parse"] = {
+            "type": "regex",
+            "pattern": "\"weight\"\\s*:\\s*([-+]?[0-9]*\\.?[0-9]+)",
+            "group": 1,
+        }
+        migrated_template["message_handler"] = migrated_handler
+        row.template = migrated_template
+        row.save()

@@ -101,8 +101,9 @@
     "trigger": "event",
     "action": "mqtt.on_message",
     "parse": {
-      "type": "expression",
-      "expression": "float(payload)"
+      "type": "regex",
+      "pattern": "\"weight\"\\s*:\\s*([-+]?[0-9]*\\.?[0-9]+)",
+      "group": 1
     }
   },
   "output": {
@@ -136,3 +137,79 @@
 - MQTT 模板把订阅写在 `steps` 里，导致逻辑错误。
 - `output.weight` 引用了不存在的步骤路径。
 - 手动步骤不是 `manual` 触发，调用执行接口会返回 403。
+
+## 10. MQTT 新手速查：先判断“消息长什么样”
+
+配置 MQTT 模板时，不要先写正则。先看发布端实际消息，再决定 `parse`。
+
+常见消息形态：
+
+- 纯数字文本：`214.46`
+- JSON：`{"weight":214.46,"unit":"kg"}`
+- JSON（字段名不同）：`{"net_weight":214.46}`
+- 普通文本：`WT=214.46kg`
+
+建议流程（3 步）：
+
+1. 用 MQTT 客户端先确认 payload 原文（不要猜格式）。
+2. 只改 `message_handler.parse`，先让 `weight` 能提取出来。
+3. 最后再补充 `output.unit` 或其他字段。
+
+## 11. MQTT `parse` 可直接复制的示例
+
+### 11.1 payload 是纯数字（如 `214.46`）
+
+```json
+"parse": {
+  "type": "expression",
+  "expression": "float(payload)"
+}
+```
+
+### 11.2 payload 是 JSON，字段名是 `weight`（推荐）
+
+```json
+"parse": {
+  "type": "regex",
+  "pattern": "\"weight\"\\s*:\\s*([-+]?[0-9]*\\.?[0-9]+)",
+  "group": 1
+}
+```
+
+### 11.3 payload 是 JSON，但字段名是 `net_weight`
+
+```json
+"parse": {
+  "type": "regex",
+  "pattern": "\"net_weight\"\\s*:\\s*([-+]?[0-9]*\\.?[0-9]+)",
+  "group": 1
+}
+```
+
+### 11.4 payload 是普通文本（如 `WT=214.46kg`）
+
+```json
+"parse": {
+  "type": "regex",
+  "pattern": "WT=\\s*([-+]?[0-9]*\\.?[0-9]+)",
+  "group": 1
+}
+```
+
+## 12. 为什么有时会 `error`，有时只是重量为空
+
+`status = error` 的典型原因：
+
+- `expression` 计算抛异常（例如消息不是数字，却写了 `float(payload)`）。
+- `parse.type` 写了不支持的类型。
+- 模板缺少 `message_handler`，但设备是 MQTT。
+
+不会报错但重量为空（`weight = null`）的典型原因：
+
+- `regex` 没匹配到内容（例如消息字段名和正则不一致）。
+
+排查顺序建议：
+
+1. 先把 `parse` 改成最简单可通过的版本（与实际 payload 一致）。
+2. 再看 `output.weight` 是否仍指向 `${message_handler.result}`。
+3. 最后再优化正则（先可用，再优雅）。

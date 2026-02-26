@@ -24,6 +24,7 @@ def layout() -> html.Div:
             html.Div("说明：设备创建时先选择协议模板，系统会自动填充连接参数与模板变量。", style={"fontSize": "13px", "color": "#444", "marginBottom": "10px"}),
             html.Div(id="devices-error", style={"color": "#c62828", "marginBottom": "8px"}),
             html.Div(id="devices-table", style={"marginBottom": "20px"}),
+            html.Div(id="delete-device-result", style={"color": "#16a34a", "marginBottom": "10px", "fontWeight": "500"}),
             html.H3("新建设备"),
             html.Div(
                 [

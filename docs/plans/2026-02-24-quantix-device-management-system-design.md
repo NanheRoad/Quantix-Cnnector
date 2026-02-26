@@ -274,8 +274,9 @@ class DeviceDriver(ABC):
         "trigger": "event",
         "action": "mqtt.on_message",
         "parse": {
-            "type": "expression",
-            "expression": "float(payload)"
+            "type": "regex",
+            "pattern": "\"weight\"\\s*:\\s*([-+]?[0-9]*\\.?[0-9]+)",
+            "group": 1
         }
     },
     "output": {
@@ -589,8 +590,9 @@ class Device(BaseModel):
         "trigger": "event",
         "action": "mqtt.on_message",
         "parse": {
-            "type": "expression",
-            "expression": "float(payload)"
+            "type": "regex",
+            "pattern": "\"weight\"\\s*:\\s*([-+]?[0-9]*\\.?[0-9]+)",
+            "group": 1
         }
     },
     "output": {

@@ -5,13 +5,15 @@ from copy import deepcopy
 from typing import Any
 
 import requests
-from dash import Dash, Input, Output, State, dcc, html, no_update
+import dash
+from dash import Dash, Input, Output, State, dcc, html, no_update, ALL
 
 from config.settings import settings
 from frontend.components.device_card import device_card
 from frontend.pages import dashboard as dashboard_page
 from frontend.pages import device_config as device_config_page
 from frontend.pages import protocol_editor as protocol_editor_page
+from frontend.time_utils import format_timestamp
 
 BACKEND_BASE = f"http://{settings.backend_host}:{settings.backend_port}"
 HEADERS = {"X-API-Key": settings.api_key}
@@ -61,7 +63,11 @@ PROTOCOL_TEMPLATE_PRESETS: dict[str, dict[str, Any]] = {
             "name": "处理消息",
             "trigger": "event",
             "action": "mqtt.on_message",
-            "parse": {"type": "expression", "expression": "float(payload)"},
+            "parse": {
+                "type": "regex",
+                "pattern": "\"weight\"\\s*:\\s*([-+]?[0-9]*\\.?[0-9]+)",
+                "group": 1,
+            },
         },
         "output": {"weight": "${message_handler.result}", "unit": "kg"},
     },
@@ -195,28 +201,47 @@ def refresh_devices(_n: int):
 
     columns = [
         ("ID", "6%"),
-        ("名称", "16%"),
+        ("名称", "14%"),
         ("模板ID", "10%"),
         ("状态", "10%"),
         ("重量", "10%"),
-        ("更新时间", "38%"),
-        ("启用", "10%"),
+        ("更新时间", "28%"),
+        ("启用", "8%"),
+        ("操作", "14%"),
     ]
     header = html.Tr([html.Th(title, style={"width": width}) for title, width in columns])
 
     rows = []
     for item in devices:
+        device_id = item.get("id")
         runtime = item.get("runtime", {})
         rows.append(
             html.Tr(
                 [
-                    html.Td(item.get("id")),
+                    html.Td(device_id),
                     html.Td(item.get("name")),
                     html.Td(item.get("protocol_template_id")),
                     html.Td(runtime.get("status", "offline")),
                     html.Td(runtime.get("weight")),
-                    html.Td(runtime.get("timestamp") or "-"),
+                    html.Td(format_timestamp(runtime.get("timestamp"))),
                     html.Td("是" if item.get("enabled") else "否"),
+                    html.Td(
+                        html.Button(
+                            "删除",
+                            id={"type": "delete-device-btn", "index": device_id},
+                            n_clicks=0,
+                            style={
+                                "padding": "4px 12px",
+                                "backgroundColor": "#dc2626",
+                                "color": "white",
+                                "border": "none",
+                                "borderRadius": "4px",
+                                "cursor": "pointer",
+                                "fontSize": "12px",
+                            },
+                        ),
+                        style={"textAlign": "center"},
+                    ),
                 ]
             )
         )
@@ -326,6 +351,40 @@ def create_device(
         return f"创建成功: device_id={created['id']}"
     except Exception as exc:
         return f"创建失败: {exc}"
+
+
+@app.callback(
+    Output("delete-device-result", "children"),
+    Input({"type": "delete-device-btn", "index": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def delete_device(clicks: list[int]):
+    """删除设备"""
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return ""
+
+    button_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    # 解析设备ID (格式: {"type": "delete-device-btn", "index": 123})
+    import ast
+    try:
+        button_info = ast.literal_eval(button_id)
+        device_id = button_info.get("index")
+        if device_id is None:
+            return "删除失败: 无效的设备ID"
+    except Exception:
+        return "删除失败: 无法解析设备ID"
+
+    # 检查是否真的点击了（n_clicks > 0）
+    triggered_index = ctx.triggered[0]["value"]
+    if triggered_index is None or triggered_index == 0:
+        return ""
+
+    try:
+        api_request("DELETE", f"/api/devices/{device_id}")
+        return f"删除成功: device_id={device_id}"
+    except Exception as exc:
+        return f"删除失败: {exc}"
 
 
 @app.callback(
