@@ -12,6 +12,7 @@ from config.settings import settings
 from frontend.components.device_card import device_card
 from frontend.pages import dashboard as dashboard_page
 from frontend.pages import device_config as device_config_page
+from frontend.pages import manual_control as manual_control_page
 from frontend.pages import protocol_editor as protocol_editor_page
 from frontend.time_utils import format_timestamp
 
@@ -48,15 +49,35 @@ PROTOCOL_TEMPLATE_PRESETS: dict[str, dict[str, Any]] = {
     "mqtt": {
         "name": "MQTT 模板示例",
         "protocol_type": "mqtt",
-        "variables": [{"name": "topic", "type": "string", "default": "sensor/weight", "label": "主题"}],
+        "variables": [
+            {"name": "data_topic", "type": "string", "default": "sensor/weight", "label": "数据主题"},
+            {"name": "cmd_topic", "type": "string", "default": "sensor/weight/cmd", "label": "控制主题"},
+            {"name": "qos", "type": "int", "default": 1, "label": "QoS"},
+        ],
         "setup_steps": [
             {
                 "id": "subscribe",
                 "name": "订阅主题",
                 "trigger": "setup",
                 "action": "mqtt.subscribe",
-                "params": {"topic": "${topic}", "qos": 1},
+                "params": {"topic": "${data_topic}", "qos": "${qos}"},
             }
+        ],
+        "steps": [
+            {
+                "id": "tare",
+                "name": "去皮",
+                "trigger": "manual",
+                "action": "mqtt.publish",
+                "params": {"topic": "${cmd_topic}", "payload": "{\"cmd\":\"tare\"}", "qos": "${qos}"},
+            },
+            {
+                "id": "zero",
+                "name": "清零",
+                "trigger": "manual",
+                "action": "mqtt.publish",
+                "params": {"topic": "${cmd_topic}", "payload": "{\"cmd\":\"zero\"}", "qos": "${qos}"},
+            },
         ],
         "message_handler": {
             "id": "handle_message",
@@ -143,6 +164,45 @@ def default_variables_from_template(template: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def extract_manual_steps(template: dict[str, Any]) -> list[dict[str, str]]:
+    steps = template.get("steps", [])
+    if not isinstance(steps, list):
+        return []
+
+    result: list[dict[str, str]] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if step.get("trigger", "poll") != "manual":
+            continue
+        step_id = str(step.get("id", "")).strip()
+        if not step_id:
+            continue
+        result.append(
+            {
+                "id": step_id,
+                "name": str(step.get("name", step_id)),
+                "action": str(step.get("action", "")),
+            }
+        )
+    return result
+
+
+def find_quick_step_id(manual_steps: list[dict[str, str]], command: str) -> str | None:
+    if command == "tare":
+        keywords = ["tare", "去皮"]
+    elif command == "zero":
+        keywords = ["zero", "清零", "归零", "置零"]
+    else:
+        return None
+
+    for step in manual_steps:
+        text = f"{step.get('id', '')} {step.get('name', '')} {step.get('action', '')}".lower()
+        if any(keyword in text for keyword in keywords):
+            return step.get("id")
+    return None
+
+
 app: Dash = Dash(__name__, suppress_callback_exceptions=True)
 app.title = "Quantix Connector"
 
@@ -156,6 +216,7 @@ app.layout = html.Div(
             children=[
                 dcc.Tab(label="实时大屏", value="dashboard"),
                 dcc.Tab(label="设备配置", value="devices"),
+                dcc.Tab(label="手动控制", value="control"),
                 dcc.Tab(label="协议模板", value="protocols"),
             ],
         ),
@@ -169,6 +230,8 @@ app.layout = html.Div(
 def render_tab_content(tab: str):
     if tab == "devices":
         return device_config_page.layout()
+    if tab == "control":
+        return manual_control_page.layout()
     if tab == "protocols":
         return protocol_editor_page.layout()
     return dashboard_page.layout()
@@ -385,6 +448,161 @@ def delete_device(clicks: list[int]):
         return f"删除成功: device_id={device_id}"
     except Exception as exc:
         return f"删除失败: {exc}"
+
+
+@app.callback(
+    Output("control-device-id", "options"),
+    Output("control-device-id", "value"),
+    Output("control-error", "children"),
+    Input("control-interval", "n_intervals"),
+    State("control-device-id", "value"),
+)
+def refresh_control_devices(_n: int, current_value: Any):
+    try:
+        devices = api_request("GET", "/api/devices")
+    except Exception as exc:
+        return [], no_update, f"加载设备失败: {exc}"
+
+    enabled_devices = [item for item in devices if item.get("enabled")]
+    options = [
+        {
+            "label": f"#{item['id']} {item['name']} ({item.get('runtime', {}).get('status', 'offline')})",
+            "value": item["id"],
+        }
+        for item in enabled_devices
+    ]
+
+    if not options:
+        return [], None, "暂无已启用设备。"
+
+    valid_values = {item["value"] for item in options}
+    if current_value in valid_values:
+        return options, no_update, ""
+    return options, options[0]["value"], ""
+
+
+@app.callback(
+    Output("control-step-id", "options"),
+    Output("control-step-id", "value"),
+    Output("control-device-help", "children"),
+    Output("control-manual-steps-store", "data"),
+    Input("control-device-id", "value"),
+)
+def load_control_manual_steps(device_id: Any):
+    if device_id is None:
+        return [], None, "请选择设备。", []
+
+    try:
+        device = api_request("GET", f"/api/devices/{int(device_id)}")
+        protocol_id = int(device.get("protocol_template_id"))
+        protocol = api_request("GET", f"/api/protocols/{protocol_id}")
+    except Exception as exc:
+        return [], None, f"加载手动步骤失败: {exc}", []
+
+    manual_steps = extract_manual_steps(protocol.get("template", {}))
+    step_options = [
+        {
+            "label": f"{step['name']} ({step['id']}) [{step['action']}]",
+            "value": step["id"],
+        }
+        for step in manual_steps
+    ]
+
+    tare_step_id = find_quick_step_id(manual_steps, "tare")
+    zero_step_id = find_quick_step_id(manual_steps, "zero")
+
+    info = html.Div(
+        [
+            html.Div(f"设备：#{device['id']} {device['name']}"),
+            html.Div(f"手动步骤数量：{len(step_options)}"),
+            html.Div(f"快捷去皮：{tare_step_id or '未匹配'}"),
+            html.Div(f"快捷清零：{zero_step_id or '未匹配'}"),
+        ]
+    )
+
+    first_step = step_options[0]["value"] if step_options else None
+    return step_options, first_step, info, manual_steps
+
+
+@app.callback(
+    Output("control-result", "children"),
+    Output("control-result-detail", "children"),
+    Input("control-tare-btn", "n_clicks"),
+    Input("control-zero-btn", "n_clicks"),
+    Input("control-execute-btn", "n_clicks"),
+    State("control-device-id", "value"),
+    State("control-step-id", "value"),
+    State("control-params-json", "value"),
+    State("control-manual-steps-store", "data"),
+    prevent_initial_call=True,
+)
+def execute_manual_command(
+    _tare_clicks: int,
+    _zero_clicks: int,
+    _execute_clicks: int,
+    device_id: Any,
+    selected_step_id: Any,
+    params_json: str,
+    manual_steps_data: Any,
+):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return no_update, no_update
+
+    if device_id is None:
+        return "执行失败: 请先选择设备。", ""
+
+    try:
+        params = json.loads(params_json or "{}")
+    except json.JSONDecodeError as exc:
+        return f"执行失败: 参数 JSON 格式错误: {exc}", ""
+
+    if not isinstance(params, dict):
+        return "执行失败: 参数必须是 JSON 对象，例如 {\"value\":1}。", ""
+
+    manual_steps: list[dict[str, str]] = []
+    if isinstance(manual_steps_data, list):
+        for item in manual_steps_data:
+            if not isinstance(item, dict):
+                continue
+            manual_steps.append(
+                {
+                    "id": str(item.get("id", "")),
+                    "name": str(item.get("name", "")),
+                    "action": str(item.get("action", "")),
+                }
+            )
+
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    target_step_id: str | None = None
+    command_name = "自定义命令"
+
+    if triggered_id == "control-tare-btn":
+        command_name = "去皮"
+        target_step_id = find_quick_step_id(manual_steps, "tare")
+        if not target_step_id:
+            return "执行失败: 未匹配到“去皮”手动步骤，请在模板中配置 trigger=manual 的去皮步骤。", ""
+    elif triggered_id == "control-zero-btn":
+        command_name = "清零"
+        target_step_id = find_quick_step_id(manual_steps, "zero")
+        if not target_step_id:
+            return "执行失败: 未匹配到“清零”手动步骤，请在模板中配置 trigger=manual 的清零步骤。", ""
+    elif triggered_id == "control-execute-btn":
+        if not selected_step_id:
+            return "执行失败: 请先选择手动步骤。", ""
+        target_step_id = str(selected_step_id)
+    else:
+        return no_update, no_update
+
+    try:
+        result = api_request(
+            "POST",
+            f"/api/devices/{int(device_id)}/execute",
+            json={"step_id": target_step_id, "params": params},
+        )
+        return f"执行成功: {command_name} ({target_step_id})", pretty_json(result)
+    except Exception as exc:
+        return f"执行失败: {exc}", ""
 
 
 @app.callback(

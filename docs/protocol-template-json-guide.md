@@ -213,3 +213,71 @@
 1. 先把 `parse` 改成最简单可通过的版本（与实际 payload 一致）。
 2. 再看 `output.weight` 是否仍指向 `${message_handler.result}`。
 3. 最后再优化正则（先可用，再优雅）。
+
+## 13. MQTT 去皮/清零可直接用模板（手动控制）
+
+下面模板适配本项目“手动控制”页面：
+
+- 设备实时数据从 `data_topic` 读取（默认 `sensor/weight`）
+- 手动命令发布到 `cmd_topic`（默认 `sensor/weight/cmd`）
+- 包含两个手动步骤：`tare`（去皮）和 `zero`（清零）
+
+```json
+{
+  "name": "MQTT 重量传感器（支持去皮清零）",
+  "protocol_type": "mqtt",
+  "variables": [
+    { "name": "data_topic", "type": "string", "default": "sensor/weight", "label": "数据主题" },
+    { "name": "cmd_topic", "type": "string", "default": "sensor/weight/cmd", "label": "控制主题" },
+    { "name": "qos", "type": "int", "default": 1, "label": "QoS" }
+  ],
+  "setup_steps": [
+    {
+      "id": "subscribe_weight",
+      "name": "订阅重量主题",
+      "trigger": "setup",
+      "action": "mqtt.subscribe",
+      "params": { "topic": "${data_topic}", "qos": "${qos}" }
+    }
+  ],
+  "steps": [
+    {
+      "id": "tare",
+      "name": "去皮",
+      "trigger": "manual",
+      "action": "mqtt.publish",
+      "params": {
+        "topic": "${cmd_topic}",
+        "payload": "{\"cmd\":\"tare\"}",
+        "qos": "${qos}"
+      }
+    },
+    {
+      "id": "zero",
+      "name": "清零",
+      "trigger": "manual",
+      "action": "mqtt.publish",
+      "params": {
+        "topic": "${cmd_topic}",
+        "payload": "{\"cmd\":\"zero\"}",
+        "qos": "${qos}"
+      }
+    }
+  ],
+  "message_handler": {
+    "id": "handle_message",
+    "name": "处理消息",
+    "trigger": "event",
+    "action": "mqtt.on_message",
+    "parse": {
+      "type": "regex",
+      "pattern": "\"weight\"\\s*:\\s*([-+]?[0-9]*\\.?[0-9]+)",
+      "group": 1
+    }
+  },
+  "output": {
+    "weight": "${message_handler.result}",
+    "unit": "kg"
+  }
+}
+```
