@@ -21,6 +21,7 @@ HEADERS = {"X-API-Key": settings.api_key}
 
 DEFAULT_CONNECTION_BY_PROTOCOL: dict[str, dict[str, Any]] = {
     "modbus_tcp": {"host": "127.0.0.1", "port": 502},
+    "modbus_rtu": {"port": "/dev/ttyUSB0", "baudrate": 9600, "bytesize": 8, "parity": "N", "stopbits": 1},
     "mqtt": {"host": "127.0.0.1", "port": 1883, "username": None, "password": None},
     "serial": {"port": "/dev/ttyUSB0", "baudrate": 9600, "bytesize": 8, "parity": "N", "stopbits": 1},
     "tcp": {"host": "127.0.0.1", "port": 8000},
@@ -30,6 +31,25 @@ PROTOCOL_TEMPLATE_PRESETS: dict[str, dict[str, Any]] = {
     "modbus_tcp": {
         "name": "Modbus 模板示例",
         "protocol_type": "modbus_tcp",
+        "variables": [
+            {"name": "slave_id", "type": "int", "default": 1, "label": "从站地址"},
+            {"name": "address", "type": "int", "default": 0, "label": "寄存器地址"},
+        ],
+        "steps": [
+            {
+                "id": "read_weight",
+                "name": "读取重量",
+                "trigger": "poll",
+                "action": "modbus.read_input_registers",
+                "params": {"slave_id": "${slave_id}", "address": "${address}", "count": 2},
+                "parse": {"type": "expression", "expression": "registers[0] * 65536 + registers[1]"},
+            }
+        ],
+        "output": {"weight": "${steps.read_weight.result}", "unit": "kg"},
+    },
+    "modbus_rtu": {
+        "name": "Modbus RTU 模板示例",
+        "protocol_type": "modbus_rtu",
         "variables": [
             {"name": "slave_id", "type": "int", "default": 1, "label": "从站地址"},
             {"name": "address", "type": "int", "default": 0, "label": "寄存器地址"},

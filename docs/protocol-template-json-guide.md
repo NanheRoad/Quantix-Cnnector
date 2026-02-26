@@ -281,3 +281,266 @@
   }
 }
 ```
+
+## 14. Modbus RTU 双向交互模板（读取 + 手动控制）
+
+下面模板适用于串口 RTU 场景：
+
+- `poll` 步骤：周期读取重量和状态码
+- `manual` 步骤：去皮、清零、写目标值
+- 可用于地磅、台秤、称重控制器等 RTU 设备
+
+```json
+{
+  "name": "Modbus RTU 双向交互模板",
+  "description": "轮询读取重量 + 手动去皮/清零/写入目标值",
+  "protocol_type": "modbus_rtu",
+  "variables": [
+    { "name": "slave_id", "type": "int", "default": 1, "label": "从站地址" },
+    { "name": "weight_addr", "type": "int", "default": 0, "label": "重量寄存器起始地址" },
+    { "name": "status_addr", "type": "int", "default": 10, "label": "状态寄存器地址" },
+    { "name": "tare_coil_addr", "type": "int", "default": 0, "label": "去皮线圈地址" },
+    { "name": "zero_coil_addr", "type": "int", "default": 1, "label": "清零线圈地址" },
+    { "name": "target_weight_addr", "type": "int", "default": 20, "label": "目标重量寄存器地址" },
+    { "name": "scale", "type": "float", "default": 1000, "label": "重量缩放系数" }
+  ],
+  "steps": [
+    {
+      "id": "read_weight",
+      "name": "读取重量",
+      "trigger": "poll",
+      "action": "modbus.read_input_registers",
+      "params": {
+        "slave_id": "${slave_id}",
+        "address": "${weight_addr}",
+        "count": 2
+      },
+      "parse": {
+        "type": "expression",
+        "expression": "(registers[0] * 65536 + registers[1]) / scale"
+      }
+    },
+    {
+      "id": "read_status",
+      "name": "读取状态",
+      "trigger": "poll",
+      "action": "modbus.read_holding_registers",
+      "params": {
+        "slave_id": "${slave_id}",
+        "address": "${status_addr}",
+        "count": 1
+      },
+      "parse": {
+        "type": "expression",
+        "expression": "registers[0]"
+      }
+    },
+    {
+      "id": "tare",
+      "name": "去皮",
+      "trigger": "manual",
+      "action": "modbus.write_coil",
+      "params": {
+        "slave_id": "${slave_id}",
+        "address": "${tare_coil_addr}",
+        "value": 1
+      }
+    },
+    {
+      "id": "zero",
+      "name": "清零",
+      "trigger": "manual",
+      "action": "modbus.write_coil",
+      "params": {
+        "slave_id": "${slave_id}",
+        "address": "${zero_coil_addr}",
+        "value": 1
+      }
+    },
+    {
+      "id": "set_target_weight",
+      "name": "写入目标重量",
+      "trigger": "manual",
+      "action": "modbus.write_register",
+      "params": {
+        "slave_id": "${slave_id}",
+        "address": "${target_weight_addr}",
+        "value": 1500
+      }
+    }
+  ],
+  "output": {
+    "weight": "${steps.read_weight.result}",
+    "status_code": "${steps.read_status.result}",
+    "unit": "kg"
+  }
+}
+```
+
+### 14.1 参数解释（RTU）
+
+- `weight_addr`: 重量高字寄存器起始地址（常见是 2 个 16bit 组合）。
+- `scale`: 缩放系数。设备若返回克值可设 `1000` 转成 kg。
+- `tare_coil_addr/zero_coil_addr`: 控制线圈地址，需按厂商手册填写。
+- `target_weight_addr`: 写入目标值的寄存器地址（如配料设定值）。
+
+### 14.2 设备实例连接参数（不是模板变量）
+
+RTU 场景创建设备时，连接参数建议如下：
+
+```json
+{
+  "port": "/dev/ttyUSB0",
+  "baudrate": 9600,
+  "bytesize": 8,
+  "parity": "N",
+  "stopbits": 1
+}
+```
+
+### 14.3 调试顺序（RTU）
+
+1. 先只保留 `read_weight`，确认 `weight` 能正常变化。
+2. 再加 `read_status`，确认状态寄存器地址无误。
+3. 最后测试 `manual` 步骤（去皮/清零/写入），检查是否返回 200。
+
+常见问题：
+
+- 一直 `offline`：串口参数或从站地址不匹配。
+- 重量异常大/小：`scale` 或寄存器高低位组合不对。
+- 手动执行返回 403：步骤没有设置 `trigger=manual`。
+
+## 15. 梅特勒托利多天平/台秤通用模板（Serial 双向）
+
+下面模板适配常见梅特勒托利多串口 ASCII/MT-SICS 风格命令，支持：
+
+- 轮询读取重量（`SI`）
+- 手动去皮（`T`）
+- 手动清零（`Z`）
+
+```json
+{
+  "name": "梅特勒托利多-天平/台秤通用模板(Serial)",
+  "description": "轮询读取重量 + 手动去皮/清零，适配常见 MT-SICS/ASCII 串口设备",
+  "protocol_type": "serial",
+  "variables": [
+    { "name": "read_command", "type": "string", "default": "SI\\r\\n", "label": "读取命令" },
+    { "name": "tare_command", "type": "string", "default": "T\\r\\n", "label": "去皮命令" },
+    { "name": "zero_command", "type": "string", "default": "Z\\r\\n", "label": "清零命令" },
+    { "name": "receive_size", "type": "int", "default": 64, "label": "接收字节数" },
+    { "name": "timeout_ms", "type": "int", "default": 1200, "label": "超时(ms)" },
+    { "name": "weight_pattern", "type": "string", "default": "([-+]?[0-9]+(?:\\.[0-9]+)?)", "label": "重量正则" },
+    { "name": "unit", "type": "string", "default": "kg", "label": "单位" }
+  ],
+  "steps": [
+    {
+      "id": "send_query",
+      "name": "发送读取命令",
+      "trigger": "poll",
+      "action": "serial.send",
+      "params": {
+        "data": "${read_command}"
+      }
+    },
+    {
+      "id": "wait_response",
+      "name": "等待响应",
+      "trigger": "poll",
+      "action": "delay",
+      "params": {
+        "milliseconds": 120
+      }
+    },
+    {
+      "id": "receive_raw",
+      "name": "接收原始报文",
+      "trigger": "poll",
+      "action": "serial.receive",
+      "params": {
+        "size": "${receive_size}",
+        "timeout": "${timeout_ms}"
+      }
+    },
+    {
+      "id": "parse_weight",
+      "name": "提取重量",
+      "trigger": "poll",
+      "action": "transform.regex_extract",
+      "params": {
+        "input": "${steps.receive_raw.result.payload}",
+        "pattern": "${weight_pattern}",
+        "group": 1
+      },
+      "parse": {
+        "type": "expression",
+        "expression": "float(payload)"
+      }
+    },
+    {
+      "id": "tare",
+      "name": "去皮",
+      "trigger": "manual",
+      "action": "serial.send",
+      "params": {
+        "data": "${tare_command}"
+      }
+    },
+    {
+      "id": "zero",
+      "name": "清零",
+      "trigger": "manual",
+      "action": "serial.send",
+      "params": {
+        "data": "${zero_command}"
+      }
+    }
+  ],
+  "output": {
+    "weight": "${steps.parse_weight.result}",
+    "unit": "${unit}"
+  }
+}
+```
+
+### 15.1 梅特勒命令说明
+
+- `SI`: 请求稳定重量（很多 MT-SICS 设备支持）。
+- `T`: 去皮。
+- `Z`: 清零。
+
+注意：不同型号命令可能不同，若不匹配请用设备手册命令替换 `read_command/tare_command/zero_command`。
+
+### 15.2 报文解析建议
+
+默认正则 `([-+]?[0-9]+(?:\\.[0-9]+)?)` 适合大多数包含数字的文本报文。  
+如果设备返回格式固定（例如 `S S      12.345 g`），建议改为更严格正则，避免误提取：
+
+```json
+{
+  "type": "regex",
+  "pattern": "S\\s+S\\s+([-+]?[0-9]*\\.?[0-9]+)",
+  "group": 1
+}
+```
+
+### 15.3 连接参数建议（梅特勒串口）
+
+设备实例连接参数可先用：
+
+```json
+{
+  "port": "/dev/ttyUSB0",
+  "baudrate": 9600,
+  "bytesize": 8,
+  "parity": "N",
+  "stopbits": 1
+}
+```
+
+若通信失败，优先核对：波特率、校验位、停止位、命令结束符（是否 `\\r\\n`）。
+
+### 15.4 快速验收
+
+1. 先用 `read_command` 能稳定读到 `weight`。
+2. 再测试手动控制页面的去皮/清零按钮是否 200 成功。
+3. 查看前端实时卡片，确认单位与变化趋势正确。
