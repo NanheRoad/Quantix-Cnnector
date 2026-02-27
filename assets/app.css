@@ -8,6 +8,7 @@
 }
 
 .qx-dropdown .Select-control {
+  min-height: 42px;
   height: 42px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
@@ -15,12 +16,22 @@
 }
 
 .qx-dropdown .Select-placeholder,
-.qx-dropdown .Select-value-label,
-.qx-dropdown .Select-input > input {
+.qx-dropdown .Select--single > .Select-control .Select-value,
+.qx-dropdown .Select-value-label {
   line-height: 40px !important;
 }
 
 .qx-dropdown .Select-input {
+  height: 40px !important;
+}
+
+.qx-dropdown .Select-input > input {
+  line-height: 40px !important;
+  padding: 0 !important;
+}
+
+.qx-dropdown .Select-clear-zone,
+.qx-dropdown .Select-arrow-zone {
   height: 40px;
 }
 

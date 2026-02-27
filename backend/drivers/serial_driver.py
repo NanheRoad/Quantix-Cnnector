@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from backend.drivers.base import DeviceDriver
@@ -9,16 +10,20 @@ try:
 except Exception:  # pragma: no cover
     serial = None
 
+logger = logging.getLogger(__name__)
+
 
 class SerialDriver(DeviceDriver):
     def __init__(self, connection_params: dict[str, Any]):
         super().__init__(connection_params)
         self._ser = None
         self._connected = False
+        self._last_error: str | None = None
 
     async def connect(self) -> bool:
         if serial is None:
             self._connected = True
+            self._last_error = None
             return True
 
         try:
@@ -31,8 +36,16 @@ class SerialDriver(DeviceDriver):
                 timeout=float(self.connection_params.get("timeout", 1.0)),
             )
             self._connected = True
-        except Exception:
+            self._last_error = None
+        except Exception as exc:
             self._connected = False
+            self._last_error = str(exc)
+            logger.warning(
+                "Serial connect failed: port=%s baudrate=%s error=%s",
+                self.connection_params.get("port", "/dev/ttyUSB0"),
+                self.connection_params.get("baudrate", 9600),
+                exc,
+            )
         return self._connected
 
     async def disconnect(self) -> bool:
@@ -44,6 +57,9 @@ class SerialDriver(DeviceDriver):
 
     async def is_connected(self) -> bool:
         return self._connected
+
+    def get_last_error(self) -> str | None:
+        return self._last_error
 
     async def execute_action(self, action: str, params: dict[str, Any]) -> Any:
         if action == "serial.send":

@@ -5,9 +5,10 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api import devices, protocols, websocket
+from backend.api import devices, protocols, serial_debug, websocket
 from backend.database.connection import close_db, init_db
 from backend.services.device_manager import manager
+from backend.services.serial_debug_service import serial_debug_service
 from config.settings import settings
 
 logging.basicConfig(
@@ -28,6 +29,7 @@ app.add_middleware(
 app.include_router(protocols.router)
 app.include_router(devices.router)
 app.include_router(websocket.router)
+app.include_router(serial_debug.router)
 
 
 @app.on_event("startup")
@@ -39,6 +41,7 @@ async def startup_event() -> None:
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     await manager.shutdown()
+    await serial_debug_service.close()
     close_db()
 
 

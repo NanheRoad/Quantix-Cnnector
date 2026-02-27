@@ -152,7 +152,13 @@ class DeviceManager:
                 if not await runtime.driver.is_connected():
                     connected = await runtime.driver.connect()
                     if not connected:
-                        runtime.state.mark_offline("connect failed")
+                        connect_error = "connect failed"
+                        get_last_error = getattr(runtime.driver, "get_last_error", None)
+                        if callable(get_last_error):
+                            last_error = get_last_error()
+                            if last_error:
+                                connect_error = f"connect failed: {last_error}"
+                        runtime.state.mark_offline(connect_error)
                         await self._event_bus.publish(runtime.state.to_message())
                         await asyncio.sleep(backoff)
                         backoff = min(backoff * 2, 30)

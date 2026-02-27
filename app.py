@@ -14,6 +14,7 @@ from frontend.pages import dashboard as dashboard_page
 from frontend.pages import device_config as device_config_page
 from frontend.pages import manual_control as manual_control_page
 from frontend.pages import protocol_editor as protocol_editor_page
+from frontend.pages import serial_debug as serial_debug_page
 from frontend.time_utils import format_timestamp
 
 BACKEND_BASE = f"http://{settings.backend_host}:{settings.backend_port}"
@@ -238,6 +239,7 @@ app.layout = html.Div(
                 dcc.Tab(label="设备配置", value="devices"),
                 dcc.Tab(label="手动控制", value="control"),
                 dcc.Tab(label="协议模板", value="protocols"),
+                dcc.Tab(label="串口调试", value="serial_debug"),
             ],
         ),
         html.Div(id="tab-content", style={"marginTop": "12px"}),
@@ -254,6 +256,8 @@ def render_tab_content(tab: str):
         return manual_control_page.layout()
     if tab == "protocols":
         return protocol_editor_page.layout()
+    if tab == "serial_debug":
+        return serial_debug_page.layout()
     return dashboard_page.layout()
 
 
@@ -683,6 +687,195 @@ def create_protocol(_n: int, name: str, description: str, protocol_type: str, te
         return f"创建成功: protocol_id={created['id']}"
     except Exception as exc:
         return f"创建失败: {exc}"
+
+
+def _normalize_serial_log_text(text: str) -> str:
+    return text.replace("\r", "\\r").replace("\n", "\\n")
+
+
+@app.callback(
+    Output("serial-debug-port", "options"),
+    Output("serial-debug-port", "value"),
+    Output("serial-debug-ports-error", "children"),
+    Input("serial-debug-refresh-btn", "n_clicks"),
+    State("serial-debug-port", "value"),
+)
+def refresh_serial_ports(_refresh_clicks: int, current_value: Any):
+    try:
+        result = api_request("GET", "/api/serial-debug/ports")
+        ports = result.get("ports", [])
+    except Exception as exc:
+        return [], no_update, f"扫描串口失败: {exc}"
+
+    options = [
+        {
+            "label": f"{item.get('device')} - {item.get('description') or item.get('name') or ''}",
+            "value": item.get("device"),
+        }
+        for item in ports
+        if item.get("device")
+    ]
+    valid_values = {item["value"] for item in options}
+    if current_value in valid_values:
+        return options, no_update, ""
+    first = options[0]["value"] if options else None
+    return options, first, ""
+
+
+@app.callback(
+    Output("serial-debug-action-result", "children"),
+    Input("serial-debug-open-btn", "n_clicks"),
+    Input("serial-debug-close-btn", "n_clicks"),
+    State("serial-debug-port", "value"),
+    State("serial-debug-baudrate", "value"),
+    State("serial-debug-bytesize", "value"),
+    State("serial-debug-parity", "value"),
+    State("serial-debug-stopbits", "value"),
+    State("serial-debug-timeout", "value"),
+    prevent_initial_call=True,
+)
+def serial_debug_connect_action(
+    _open_clicks: int,
+    _close_clicks: int,
+    port: Any,
+    baudrate: Any,
+    bytesize: Any,
+    parity: Any,
+    stopbits: Any,
+    timeout_ms: Any,
+):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return ""
+
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    try:
+        if triggered_id == "serial-debug-open-btn":
+            if not port:
+                return "连接失败: 请先选择串口。"
+
+            payload = {
+                "port": str(port),
+                "baudrate": int(baudrate or 9600),
+                "bytesize": int(bytesize or 8),
+                "parity": str(parity or "N"),
+                "stopbits": float(stopbits or 1),
+                "timeout_ms": int(timeout_ms or 300),
+            }
+            result = api_request("POST", "/api/serial-debug/open", json=payload)
+            settings_data = result.get("settings", {})
+            return (
+                "连接成功: "
+                f"{settings_data.get('port')} "
+                f"{settings_data.get('baudrate')}/{settings_data.get('bytesize')}/"
+                f"{settings_data.get('parity')}/{settings_data.get('stopbits')}"
+            )
+
+        if triggered_id == "serial-debug-close-btn":
+            api_request("POST", "/api/serial-debug/close")
+            return "已断开串口连接。"
+    except Exception as exc:
+        return f"操作失败: {exc}"
+
+    return ""
+
+
+@app.callback(
+    Output("serial-debug-send-result", "children"),
+    Input("serial-debug-send-btn", "n_clicks"),
+    State("serial-debug-send-data", "value"),
+    State("serial-debug-data-format", "value"),
+    State("serial-debug-encoding", "value"),
+    State("serial-debug-line-ending", "value"),
+    prevent_initial_call=True,
+)
+def send_serial_debug_data(
+    _send_clicks: int,
+    send_data: Any,
+    data_format: Any,
+    encoding: Any,
+    line_ending: Any,
+):
+    payload_text = str(send_data or "")
+    if not payload_text:
+        return "发送失败: 数据为空。"
+
+    try:
+        result = api_request(
+            "POST",
+            "/api/serial-debug/send",
+            json={
+                "data": payload_text,
+                "data_format": str(data_format or "text"),
+                "encoding": str(encoding or "utf-8"),
+                "line_ending": str(line_ending or "none"),
+            },
+        )
+        return f"发送成功: {result.get('bytes_sent', 0)} 字节，HEX={result.get('payload_hex', '')}"
+    except Exception as exc:
+        return f"发送失败: {exc}"
+
+
+@app.callback(
+    Output("serial-debug-status", "children"),
+    Output("serial-debug-log-store", "data"),
+    Output("serial-debug-log", "children"),
+    Output("serial-debug-recv-error", "children"),
+    Input("serial-debug-interval", "n_intervals"),
+    Input("serial-debug-clear-log-btn", "n_clicks"),
+    State("serial-debug-log-store", "data"),
+)
+def refresh_serial_debug_runtime(_n: int, _clear_clicks: int, stored_logs: Any):
+    logs: list[str] = []
+    if isinstance(stored_logs, list):
+        logs = [str(item) for item in stored_logs]
+
+    ctx = dash.callback_context
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else ""
+    if triggered_id == "serial-debug-clear-log-btn":
+        logs = []
+
+    try:
+        status = api_request("GET", "/api/serial-debug/status")
+    except Exception as exc:
+        log_text = "\n".join(logs) if logs else "暂无收包日志"
+        return f"状态查询失败: {exc}", logs, log_text, ""
+
+    settings_data = status.get("settings", {})
+    connected = bool(status.get("connected"))
+    if connected:
+        status_text = (
+            "状态：已连接 "
+            f"{settings_data.get('port', '-')}, "
+            f"{settings_data.get('baudrate', '-')}/"
+            f"{settings_data.get('bytesize', '-')}/"
+            f"{settings_data.get('parity', '-')}/"
+            f"{settings_data.get('stopbits', '-')}"
+        )
+    else:
+        last_error = status.get("last_error")
+        status_text = f"状态：未连接{f'，最近错误：{last_error}' if last_error else ''}"
+
+    recv_error = ""
+    if connected and triggered_id != "serial-debug-clear-log-btn":
+        try:
+            result = api_request(
+                "GET",
+                "/api/serial-debug/read",
+                params={"max_bytes": 2048, "timeout_ms": 30, "encoding": "utf-8"},
+            )
+            if int(result.get("bytes_read", 0)) > 0:
+                ts = format_timestamp(result.get("timestamp"))
+                text = _normalize_serial_log_text(str(result.get("payload_text", "")))
+                payload_hex = str(result.get("payload_hex", ""))
+                logs.append(f"[{ts}] RX {result.get('bytes_read')}B: {text} | HEX: {payload_hex}")
+                if len(logs) > 300:
+                    logs = logs[-300:]
+        except Exception as exc:
+            recv_error = f"读取失败: {exc}"
+
+    log_text = "\n".join(logs) if logs else "暂无收包日志"
+    return status_text, logs, log_text, recv_error
 
 
 if __name__ == "__main__":
