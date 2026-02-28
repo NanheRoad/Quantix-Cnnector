@@ -544,3 +544,249 @@ RTU 场景创建设备时，连接参数建议如下：
 1. 先用 `read_command` 能稳定读到 `weight`。
 2. 再测试手动控制页面的去皮/清零按钮是否 200 成功。
 3. 查看前端实时卡片，确认单位与变化趋势正确。
+
+---
+
+## 16. 奥豪斯 Navigator 天平串口模板（Serial 双向）
+
+下面模板适配奥豪斯 Navigator 系列（NV/NVL/NVT）电子天平的 USB 虚拟串口协议：
+
+- 轮询读取重量（`P` 命令）
+- 手动打印（`SP` 稳定值 / `IP` 当前显示）
+- 手动去皮（`T`）
+- 手动清零（`Z`）
+- 支持切换单位（`U`）
+- 支持切换模式（`M`）
+
+```json
+{
+  "name": "奥豪斯 Navigator 天平 (NV/NVL/NVT)",
+  "description": "适配奥豪斯 Navigator 系列电子天平，支持轮询读取、打印、去皮、清零、切换单位/模式",
+  "protocol_type": "serial",
+  "variables": [
+    { "name": "poll_command", "type": "string", "default": "P\\r", "label": "轮询读取命令" },
+    { "name": "print_stable_command", "type": "string", "default": "SP\\r", "label": "打印稳定值命令" },
+    { "name": "print_current_command", "type": "string", "default": "IP\\r", "label": "打印当前显示命令" },
+    { "name": "tare_command", "type": "string", "default": "T\\r", "label": "去皮命令" },
+    { "name": "zero_command", "type": "string", "default": "Z\\r", "label": "清零命令" },
+    { "name": "unit_command", "type": "string", "default": "U\\r", "label": "切换单位命令" },
+    { "name": "mode_command", "type": "string", "default": "M\\r", "label": "切换模式命令" },
+    { "name": "receive_size", "type": "int", "default": 64, "label": "接收字节数" },
+    { "name": "timeout_ms", "type": "int", "default": 1200, "label": "超时(ms)" },
+    { "name": "weight_pattern", "type": "string", "default": "\\s*([-+]?[0-9]+(?:\\.[0-9]+)?)\\s+([a-zA-Z]+)", "label": "重量和单位正则" },
+    { "name": "default_unit", "type": "string", "default": "g", "label": "默认单位" }
+  ],
+  "steps": [
+    {
+      "id": "send_poll",
+      "name": "发送轮询命令",
+      "trigger": "poll",
+      "action": "serial.send",
+      "params": {
+        "data": "${poll_command}"
+      }
+    },
+    {
+      "id": "wait_poll_response",
+      "name": "等待响应",
+      "trigger": "poll",
+      "action": "delay",
+      "params": {
+        "milliseconds": 150
+      }
+    },
+    {
+      "id": "receive_poll_raw",
+      "name": "接收轮询响应",
+      "trigger": "poll",
+      "action": "serial.receive",
+      "params": {
+        "size": "${receive_size}",
+        "timeout": "${timeout_ms}"
+      }
+    },
+    {
+      "id": "parse_weight",
+      "name": "解析重量和单位",
+      "trigger": "poll",
+      "action": "transform.regex_extract",
+      "params": {
+        "input": "${steps.receive_poll_raw.result.payload}",
+        "pattern": "${weight_pattern}",
+        "group": 1
+      },
+      "parse": {
+        "type": "expression",
+        "expression": "float(payload)"
+      }
+    },
+    {
+      "id": "parse_unit",
+      "name": "解析单位",
+      "trigger": "poll",
+      "action": "transform.regex_extract",
+      "params": {
+        "input": "${steps.receive_poll_raw.result.payload}",
+        "pattern": "${weight_pattern}",
+        "group": 2
+      },
+      "parse": {
+        "type": "expression",
+        "expression": "payload.strip()"
+      }
+    },
+    {
+      "id": "print_stable",
+      "name": "打印稳定值",
+      "trigger": "manual",
+      "action": "serial.send",
+      "params": {
+        "data": "${print_stable_command}"
+      }
+    },
+    {
+      "id": "print_current",
+      "name": "打印当前显示",
+      "trigger": "manual",
+      "action": "serial.send",
+      "params": {
+        "data": "${print_current_command}"
+      }
+    },
+    {
+      "id": "tare",
+      "name": "去皮",
+      "trigger": "manual",
+      "action": "serial.send",
+      "params": {
+        "data": "${tare_command}"
+      }
+    },
+    {
+      "id": "zero",
+      "name": "清零",
+      "trigger": "manual",
+      "action": "serial.send",
+      "params": {
+        "data": "${zero_command}"
+      }
+    },
+    {
+      "id": "toggle_unit",
+      "name": "切换单位",
+      "trigger": "manual",
+      "action": "serial.send",
+      "params": {
+        "data": "${unit_command}"
+      }
+    },
+    {
+      "id": "toggle_mode",
+      "name": "切换模式",
+      "trigger": "manual",
+      "action": "serial.send",
+      "params": {
+        "data": "${mode_command}"
+      }
+    }
+  ],
+  "output": {
+    "weight": "${steps.parse_weight.result}",
+    "unit": "${steps.parse_unit.result}",
+    "raw_payload": "${steps.receive_poll_raw.result.payload}"
+  }
+}
+```
+
+### 16.1 命令说明
+
+Navigator 系列支持的主要命令：
+
+| 命令 | 功能 | 模板变量 |
+|------|------|----------|
+| `P` | 立即打印当前重量 | `poll_command` |
+| `SP` | 仅打印稳定值 | `print_stable_command` |
+| `IP` | 打印当前显示（不稳定也可） | `print_current_command` |
+| `T` | 去皮 | `tare_command` |
+| `Z` | 清零 | `zero_command` |
+| `U` | 切换显示单位 | `unit_command` |
+| `M` | 切换称重模式 | `mode_command` |
+
+其他可用命令（可按需添加）：
+
+| 命令 | 功能 |
+|------|------|
+| `CP` | 连续打印 |
+| `SLP` | 自动打印非零稳定值 |
+| `SLZP` | 自动打印非零稳定值+零点 |
+| `xP` | 每 x 秒打印（1-3600） |
+| `0P` | 关闭自动打印 |
+| `PM` | 打印当前模式 |
+| `PU` | 打印当前单位 |
+| `PV` | 打印软件版本 |
+
+### 16.2 数据格式说明
+
+Navigator 返回数据格式：
+
+```
+[weight:10][ ][unit:1~5][ ][stability:1][ ][NET:0|3][legend:0~16]\r\n
+```
+
+**示例数据**
+
+```
+*******200 g
+********15 g   NET
+*******124 g ? NET
+********15 g   NET 00:00:02
+***5:10.75 lb:oz ? NET ACCEPT 00:00:05
+```
+
+- `?` 标记表示不稳定
+- `NET` 表示净重模式
+- `lb:oz` 表示磅:盎司复合单位
+
+默认正则 `\\s*([-+]?[0-9]+(?:\\.[0-9]+)?)\\s+([a-zA-Z]+)` 可提取：
+- 第1组：重量值（如 `200`、`15.73`、`5:10.75`）
+- 第2组：单位（如 `g`、`lb:oz`）
+
+### 16.3 连接参数建议
+
+奥豪斯 Navigator USB（虚拟串口）默认参数：
+
+```json
+{
+  "port": "COM3",
+  "baudrate": 2400,
+  "bytesize": 7,
+  "parity": "N",
+  "stopbits": 1
+}
+```
+
+可选配置（按设备实际设置）：
+
+| 参数 | 可选值 |
+|------|--------|
+| 波特率 | 600 / 1200 / 2400 / 4800 / 9600 / 19200 |
+| 校验位 | 7-even / 7-odd / 7-none / 8-none |
+| 握手 | None / Xon-Xoff / RTS-CTS |
+
+### 16.4 复合单位处理
+
+当使用 `lb:oz` 等复合单位时，返回的 `weight` 会是 `5:10.75` 格式。
+如需单独处理，可在解析步骤中添加自定义正则或表达式。
+
+### 16.5 快速验收
+
+1. 确认串口参数正确，能正常连接设备
+2. 用轮询命令 `P` 确认能稳定读到 `weight` 和 `unit`
+3. 测试手动控制页面的去皮/清零/打印按钮是否返回 200
+4. 检查前端实时卡片，确认重量值和单位变化正确
+
+常见问题：
+
+- 读不到数据：检查波特率/校验位/停止位配置
+- 重量为空：确认正则表达式是否匹配实际返回格式
+- 单位错误：检查 `group: 2` 是否正确提取单位字段
