@@ -15,7 +15,7 @@ import math
 import random
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Tuple, List, Callable
+from typing import Any, Optional, Tuple, List, Callable
 
 try:
     import serial
@@ -606,13 +606,29 @@ class SerialSimulator:
     def list_available_ports(self):
         """列出可用串口"""
         print("\n═══════════════ 可用串口 ═══════════════")
-        ports = serial.tools.list_ports.comports()
+        ports = list(serial.tools.list_ports.comports())
         if not ports:
             print("  没有找到可用串口")
         else:
             for i, port in enumerate(ports, 1):
                 print(f"  {i}. {port.device} - {port.description}")
         print("═══════════════════════════════════════\n")
+        return ports
+
+    def resolve_port_selection(self, value: str, ports: List[Any]) -> Optional[str]:
+        """支持输入序号或直接输入串口名。"""
+        text = str(value or "").strip()
+        if not text:
+            return None
+
+        if text.isdigit():
+            index = int(text) - 1
+            if index < 0 or index >= len(ports):
+                print(f"[错误] 无效序号: {text}")
+                return None
+            return str(getattr(ports[index], "device", "")).strip() or None
+
+        return text
 
     def create_virtual_serial_pair(self) -> bool:
         """创建虚拟串口对"""
@@ -1003,8 +1019,13 @@ def main():
 
         elif choice == '2':
             # 连接现有串口
-            simulator.list_available_ports()
-            port = input("输入串口名称 (如 COM3 或 /dev/ttyUSB0): ").strip()
+            ports = simulator.list_available_ports()
+            raw_port = input("输入串口序号或名称 (如 1 / COM3 / /dev/ttyUSB0): ").strip()
+            port = simulator.resolve_port_selection(raw_port, ports)
+            if not port:
+                print("[错误] 串口选择无效")
+                continue
+
             baudrate = input("波特率 (默认9600): ").strip() or '9600'
 
             if simulator.connect_to_serial(port, int(baudrate)):

@@ -59,8 +59,12 @@ def layout() -> html.Div:
         [
             dcc.Interval(id="serial-debug-interval", interval=1000, n_intervals=0),
             dcc.Store(id="serial-debug-log-store", data=[]),
+            dcc.Store(id="serial-debug-log-seq-store", data=0),
             html.H2("串口调试助手"),
-            html.Div("说明：可扫描本地串口，配置参数后连接，支持文本/HEX 发送和实时收包日志。", style={"fontSize": "13px", "color": "#444", "marginBottom": "10px"}),
+            html.Div(
+                "可扫描本地串口，配置参数后连接，支持文本/HEX 发送和 RX/TX 实时日志。",
+                style={"fontSize": "13px", "color": "#444", "marginBottom": "10px"},
+            ),
             html.Div(
                 [
                     html.Div(
@@ -72,6 +76,8 @@ def layout() -> html.Div:
                                 placeholder="请选择串口",
                                 clearable=False,
                                 className="qx-dropdown",
+                                persistence=True,
+                                persistence_type="session",
                             ),
                             help_text("点击“刷新串口”可重新扫描本机串口列表。"),
                         ]
@@ -85,6 +91,8 @@ def layout() -> html.Div:
                                 value=9600,
                                 clearable=False,
                                 className="qx-dropdown",
+                                persistence=True,
+                                persistence_type="session",
                             ),
                             help_text("与设备串口参数保持一致。"),
                         ]
@@ -98,6 +106,8 @@ def layout() -> html.Div:
                                 value=8,
                                 clearable=False,
                                 className="qx-dropdown",
+                                persistence=True,
+                                persistence_type="session",
                             ),
                             help_text("常见设备为 8 位。"),
                         ]
@@ -111,8 +121,10 @@ def layout() -> html.Div:
                                 value="N",
                                 clearable=False,
                                 className="qx-dropdown",
+                                persistence=True,
+                                persistence_type="session",
                             ),
-                            help_text("None/Even/Odd。"),
+                            help_text("None / Even / Odd。"),
                         ]
                     ),
                     html.Div(
@@ -124,6 +136,8 @@ def layout() -> html.Div:
                                 value=1,
                                 clearable=False,
                                 className="qx-dropdown",
+                                persistence=True,
+                                persistence_type="session",
                             ),
                             help_text("通常为 1。"),
                         ]
@@ -139,6 +153,8 @@ def layout() -> html.Div:
                                 step=10,
                                 className="qx-input",
                                 style={"width": "100%"},
+                                persistence=True,
+                                persistence_type="session",
                             ),
                             help_text("连接后读取串口的默认超时时间。"),
                         ]
@@ -154,7 +170,7 @@ def layout() -> html.Div:
                 ],
                 style={"display": "flex", "gap": "10px", "marginTop": "10px"},
             ),
-            html.Div(id="serial-debug-status", style={"marginTop": "8px", "fontWeight": "600"}),
+            html.Div(id="serial-debug-status", className="serial-debug-status-card"),
             html.Div(id="serial-debug-action-result", style={"marginTop": "6px", "color": "#0f766e"}),
             html.Div(id="serial-debug-ports-error", style={"marginTop": "4px", "color": "#c62828"}),
             html.H3("发送"),
@@ -169,6 +185,8 @@ def layout() -> html.Div:
                                 value="text",
                                 clearable=False,
                                 className="qx-dropdown",
+                                persistence=True,
+                                persistence_type="session",
                             ),
                         ]
                     ),
@@ -181,6 +199,8 @@ def layout() -> html.Div:
                                 value="utf-8",
                                 clearable=False,
                                 className="qx-dropdown",
+                                persistence=True,
+                                persistence_type="session",
                             ),
                         ]
                     ),
@@ -193,6 +213,8 @@ def layout() -> html.Div:
                                 value="none",
                                 clearable=False,
                                 className="qx-dropdown",
+                                persistence=True,
+                                persistence_type="session",
                             ),
                         ]
                     ),
@@ -204,6 +226,8 @@ def layout() -> html.Div:
                 value="",
                 placeholder="输入要发送的数据（文本或HEX）",
                 style={"width": "100%", "height": "110px", "marginTop": "8px"},
+                persistence=True,
+                persistence_type="session",
             ),
             html.Div(
                 [
@@ -217,10 +241,13 @@ def layout() -> html.Div:
             html.Button("清空日志", id="serial-debug-clear-log-btn", n_clicks=0, style={"padding": "6px 12px", "marginBottom": "8px"}),
             html.Pre(
                 id="serial-debug-log",
-                children="暂无收包日志",
+                children="暂无串口日志",
+                className="serial-debug-log-box",
                 style={
                     "padding": "10px",
                     "minHeight": "220px",
+                    "maxHeight": "360px",
+                    "overflowY": "auto",
                     "background": "#0f172a",
                     "color": "#e2e8f0",
                     "borderRadius": "8px",

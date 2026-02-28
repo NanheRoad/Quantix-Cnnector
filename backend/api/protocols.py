@@ -6,11 +6,20 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from backend.api.deps import require_api_key
 from backend.api.schemas import ProtocolTemplateCreate, ProtocolTemplateUpdate, ProtocolTestRequest
-from backend.database.models import ProtocolTemplate
+from backend.database.models import Device, ProtocolTemplate
 from backend.drivers import build_driver
 from backend.services.protocol_executor import ProtocolExecutor
 
 router = APIRouter(prefix="/api/protocols", tags=["protocols"], dependencies=[Depends(require_api_key)])
+
+
+def _ensure_template_not_in_use(template_id: int) -> None:
+    in_use = Device.select().where(Device.protocol_template_id == template_id).exists()
+    if in_use:
+        raise HTTPException(
+            status_code=409,
+            detail="Protocol template is referenced by existing devices and cannot be modified or deleted",
+        )
 
 
 @router.get("")
@@ -60,6 +69,7 @@ def update_protocol(protocol_id: int, payload: ProtocolTemplateUpdate) -> dict[s
     row = ProtocolTemplate.get_or_none(ProtocolTemplate.id == protocol_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Protocol not found")
+    _ensure_template_not_in_use(row.id)
 
     data = payload.model_dump(exclude_none=True)
     for key, value in data.items():
@@ -73,6 +83,7 @@ def delete_protocol(protocol_id: int) -> dict[str, bool]:
     row = ProtocolTemplate.get_or_none(ProtocolTemplate.id == protocol_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Protocol not found")
+    _ensure_template_not_in_use(row.id)
     if row.is_system:
         raise HTTPException(status_code=403, detail="System protocol can not be deleted")
     row.delete_instance(recursive=True)

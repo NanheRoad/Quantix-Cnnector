@@ -69,3 +69,14 @@ async def read_serial_debug(
         return await serial_debug_service.read(max_bytes=max_bytes, timeout_ms=timeout_ms, encoding=encoding)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/logs")
+async def get_serial_debug_logs(
+    last_seq: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> dict[str, Any]:
+    try:
+        return await serial_debug_service.pull_logs(last_seq=last_seq, limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

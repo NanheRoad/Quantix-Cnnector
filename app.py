@@ -163,7 +163,15 @@ def api_request(method: str, path: str, **kwargs: Any) -> Any:
         timeout=5,
         **kwargs,
     )
-    response.raise_for_status()
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                detail = str(payload.get("detail") or payload)
+        except Exception:
+            pass
+        raise requests.HTTPError(f"{response.status_code} {detail}", response=response)
     if response.content:
         return response.json()
     return None
@@ -394,7 +402,10 @@ def update_device_template_info(template_id: Any):
             html.Div(f"模板名称：{protocol.get('name', '-')}", style={"fontWeight": "600"}),
             html.Div(f"协议类型：{protocol_type}"),
             html.Div(f"说明：{protocol.get('description') or '无'}"),
-            html.Div("提示：连接参数和变量已按模板自动填充，你可以继续手动调整。", style={"fontSize": "12px", "color": "#666", "marginTop": "6px"}),
+            html.Div(
+                "连接参数和变量已按模板默认值自动填充，你可以继续手动调整。",
+                style={"fontSize": "12px", "color": "#666", "marginTop": "6px"},
+            ),
         ]
     )
     return info, pretty_json(conn_example), pretty_json(defaults)
@@ -446,13 +457,13 @@ def create_device(
     prevent_initial_call=True,
 )
 def delete_device(clicks: list[int]):
-    """删除设备"""
+    """删除设备。"""
     ctx = dash.callback_context
     if not ctx.triggered:
         return ""
 
     button_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    # 解析设备ID (格式: {"type": "delete-device-btn", "index": 123})
+    # 解析设备ID (格式: {"type":"delete-device-btn","index":123})
     import ast
     try:
         button_info = ast.literal_eval(button_id)
@@ -632,33 +643,103 @@ def execute_manual_command(
 @app.callback(
     Output("protocols-list", "children"),
     Output("protocols-error", "children"),
+    Output("protocol-edit-id", "options"),
+    Output("protocol-edit-id", "value"),
     Input("protocols-interval", "n_intervals"),
+    State("protocol-edit-id", "value"),
 )
-def refresh_protocols(_n: int):
+def refresh_protocols(_n: int, current_edit_id: Any):
     try:
         protocols = api_request("GET", "/api/protocols")
+        devices = api_request("GET", "/api/devices")
     except Exception as exc:
-        return html.Div(), f"加载失败: {exc}"
+        return html.Div(), f"加载失败: {exc}", [], no_update
 
-    rows = [html.Li(f"#{item['id']} {item['name']} ({item['protocol_type']})") for item in protocols]
-    return html.Ul(rows), ""
+    usage_count: dict[int, int] = {}
+    for item in devices:
+        try:
+            template_id = int(item.get("protocol_template_id"))
+        except Exception:
+            continue
+        usage_count[template_id] = usage_count.get(template_id, 0) + 1
+
+    rows = []
+    for item in protocols:
+        template_id = int(item.get("id", 0))
+        rows.append(
+            html.Tr(
+                [
+                    html.Td(template_id),
+                    html.Td(item.get("name")),
+                    html.Td(item.get("protocol_type")),
+                    html.Td(item.get("description") or "-"),
+                    html.Td(usage_count.get(template_id, 0)),
+                    html.Td("是" if item.get("is_system") else "否"),
+                ]
+            )
+        )
+
+    table = html.Table(
+        [
+            html.Thead(
+                html.Tr(
+                    [
+                        html.Th("ID"),
+                        html.Th("名称"),
+                        html.Th("协议类型"),
+                        html.Th("描述"),
+                        html.Th("绑定设备数"),
+                        html.Th("系统模板"),
+                    ]
+                )
+            ),
+            html.Tbody(rows),
+        ],
+        className="qx-table",
+    )
+
+    options = [
+        {
+            "label": f"#{item['id']} {item['name']} ({item['protocol_type']})",
+            "value": item["id"],
+        }
+        for item in protocols
+    ]
+    valid_ids = {item["value"] for item in options}
+    if current_edit_id in valid_ids:
+        return table, "", options, no_update
+    return table, "", options, None
 
 
 @app.callback(
     Output("protocol-template-json", "value"),
     Output("protocol-template-help", "children"),
+    Output("protocol-preset-last-type", "data"),
     Input("protocol-type", "value"),
+    State("protocol-template-json", "value"),
+    State("protocol-preset-last-type", "data"),
 )
-def load_protocol_preset(protocol_type: str):
+def load_protocol_preset(protocol_type: str, current_json: str | None, last_type: str | None):
     normalized = str(protocol_type or "modbus_tcp")
     preset = deepcopy(PROTOCOL_TEMPLATE_PRESETS.get(normalized, PROTOCOL_TEMPLATE_PRESETS["modbus_tcp"]))
 
     if normalized == "mqtt":
-        text = "MQTT 模板采用 setup_steps + message_handler。setup 负责订阅，message_handler 负责解析消息。"
+        text = "MQTT 模板建议使用 setup_steps + message_handler。setup 负责订阅，message_handler 负责解析消息。"
     else:
         text = "轮询协议模板建议使用 steps + trigger=poll；写操作步骤建议设置 trigger=manual。"
 
-    return pretty_json(preset), text
+    # Keep user-edited JSON when returning to same tab/type.
+    # Reset to preset only when protocol type actually changes.
+    current_text = str(current_json or "").strip()
+    previous_type = str(last_type or "").strip()
+
+    if previous_type and previous_type == normalized:
+        return no_update, text, normalized
+
+    if (not previous_type) and current_text and current_text != "{}":
+        return no_update, text, normalized
+
+    return pretty_json(preset), text, normalized
 
 
 @app.callback(
@@ -689,8 +770,124 @@ def create_protocol(_n: int, name: str, description: str, protocol_type: str, te
         return f"创建失败: {exc}"
 
 
+@app.callback(
+    Output("protocol-edit-name", "value"),
+    Output("protocol-edit-desc", "value"),
+    Output("protocol-edit-type", "value"),
+    Output("protocol-edit-template-json", "value"),
+    Input("protocol-edit-id", "value"),
+)
+def load_protocol_for_edit(protocol_id: Any):
+    if not protocol_id:
+        return "", "", "modbus_tcp", "{}"
+
+    try:
+        protocol = api_request("GET", f"/api/protocols/{int(protocol_id)}")
+    except Exception:
+        return "", "", "modbus_tcp", "{}"
+
+    template = protocol.get("template", {})
+    return (
+        str(protocol.get("name") or ""),
+        str(protocol.get("description") or ""),
+        str(protocol.get("protocol_type") or "modbus_tcp"),
+        pretty_json(template),
+    )
+
+
+@app.callback(
+    Output("protocol-edit-result", "children"),
+    Input("protocol-update-btn", "n_clicks"),
+    Input("protocol-delete-btn", "n_clicks"),
+    State("protocol-edit-id", "value"),
+    State("protocol-edit-name", "value"),
+    State("protocol-edit-desc", "value"),
+    State("protocol-edit-type", "value"),
+    State("protocol-edit-template-json", "value"),
+    prevent_initial_call=True,
+)
+def update_or_delete_protocol(
+    _update_clicks: int,
+    _delete_clicks: int,
+    protocol_id: Any,
+    name: str,
+    description: str,
+    protocol_type: str,
+    template_json: str,
+):
+    if not protocol_id:
+        return "请先选择模板"
+
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return no_update
+
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+
+    try:
+        if triggered_id == "protocol-delete-btn":
+            api_request("DELETE", f"/api/protocols/{int(protocol_id)}")
+            return f"删除成功: protocol_id={int(protocol_id)}"
+
+        template = json.loads(template_json or "{}")
+        template["name"] = template.get("name") or (name or "")
+        template["protocol_type"] = protocol_type
+
+        payload = {
+            "name": name,
+            "description": description,
+            "protocol_type": protocol_type,
+            "template": template,
+        }
+        updated = api_request("PUT", f"/api/protocols/{int(protocol_id)}", json=payload)
+        return f"更新成功: protocol_id={updated['id']}"
+    except Exception as exc:
+        if triggered_id == "protocol-delete-btn":
+            return f"删除失败: {exc}"
+        return f"更新失败: {exc}"
+
+
 def _normalize_serial_log_text(text: str) -> str:
     return text.replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _build_serial_status_view(status: dict[str, Any]) -> html.Div:
+    settings_data = status.get("settings", {})
+    connected = bool(status.get("connected"))
+    badge_text = "已连接" if connected else "未连接"
+    badge_class = "serial-debug-status-badge connected" if connected else "serial-debug-status-badge disconnected"
+
+    info = [
+        f"串口: {settings_data.get('port', '-')}",
+        (
+            f"波特率/数据位/校验位/停止位: "
+            f"{settings_data.get('baudrate', '-')}/{settings_data.get('bytesize', '-')}/"
+            f"{settings_data.get('parity', '-')}/{settings_data.get('stopbits', '-')}"
+        ),
+        f"超时: {settings_data.get('timeout_ms', '-')} ms",
+    ]
+
+    last_error = status.get("last_error")
+    if last_error:
+        info.append(f"最近错误: {last_error}")
+
+    return html.Div(
+        [
+            html.Div(html.Span(badge_text, className=badge_class), style={"marginBottom": "8px"}),
+            html.Div([html.Div(line, style={"fontSize": "13px", "lineHeight": "1.5"}) for line in info]),
+        ]
+    )
+
+
+def _format_serial_log_entry(entry: dict[str, Any]) -> str:
+    ts = format_timestamp(entry.get("timestamp"))
+    direction = str(entry.get("direction") or "?")
+    bytes_count = int(entry.get("bytes", 0))
+    text = _normalize_serial_log_text(str(entry.get("text") or ""))
+    payload_hex = str(entry.get("hex") or "")
+    if text:
+        return f"[{ts}] {direction} {bytes_count}B: {text} | HEX: {payload_hex}"
+    return f"[{ts}] {direction} {bytes_count}B | HEX: {payload_hex}"
 
 
 @app.callback(
@@ -821,62 +1018,67 @@ def send_serial_debug_data(
     Output("serial-debug-log-store", "data"),
     Output("serial-debug-log", "children"),
     Output("serial-debug-recv-error", "children"),
+    Output("serial-debug-log-seq-store", "data"),
     Input("serial-debug-interval", "n_intervals"),
     Input("serial-debug-clear-log-btn", "n_clicks"),
     State("serial-debug-log-store", "data"),
+    State("serial-debug-log-seq-store", "data"),
 )
-def refresh_serial_debug_runtime(_n: int, _clear_clicks: int, stored_logs: Any):
+def refresh_serial_debug_runtime(_n: int, _clear_clicks: int, stored_logs: Any, log_seq: Any):
     logs: list[str] = []
     if isinstance(stored_logs, list):
         logs = [str(item) for item in stored_logs]
 
+    try:
+        seq = int(log_seq or 0)
+    except Exception:
+        seq = 0
+
     ctx = dash.callback_context
     triggered_id = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else ""
-    if triggered_id == "serial-debug-clear-log-btn":
+    clear_requested = triggered_id == "serial-debug-clear-log-btn"
+    if clear_requested:
         logs = []
 
     try:
         status = api_request("GET", "/api/serial-debug/status")
     except Exception as exc:
-        log_text = "\n".join(logs) if logs else "暂无收包日志"
-        return f"状态查询失败: {exc}", logs, log_text, ""
-
-    settings_data = status.get("settings", {})
-    connected = bool(status.get("connected"))
-    if connected:
-        status_text = (
-            "状态：已连接 "
-            f"{settings_data.get('port', '-')}, "
-            f"{settings_data.get('baudrate', '-')}/"
-            f"{settings_data.get('bytesize', '-')}/"
-            f"{settings_data.get('parity', '-')}/"
-            f"{settings_data.get('stopbits', '-')}"
-        )
-    else:
-        last_error = status.get("last_error")
-        status_text = f"状态：未连接{f'，最近错误：{last_error}' if last_error else ''}"
+        log_text = "\n".join(logs) if logs else "暂无串口日志"
+        return f"状态查询失败: {exc}", logs, log_text, "", seq
 
     recv_error = ""
-    if connected and triggered_id != "serial-debug-clear-log-btn":
+    connected = bool(status.get("connected"))
+    if connected and not clear_requested:
         try:
-            result = api_request(
+            api_request(
                 "GET",
                 "/api/serial-debug/read",
                 params={"max_bytes": 2048, "timeout_ms": 30, "encoding": "utf-8"},
             )
-            if int(result.get("bytes_read", 0)) > 0:
-                ts = format_timestamp(result.get("timestamp"))
-                text = _normalize_serial_log_text(str(result.get("payload_text", "")))
-                payload_hex = str(result.get("payload_hex", ""))
-                logs.append(f"[{ts}] RX {result.get('bytes_read')}B: {text} | HEX: {payload_hex}")
-                if len(logs) > 300:
-                    logs = logs[-300:]
         except Exception as exc:
             recv_error = f"读取失败: {exc}"
 
-    log_text = "\n".join(logs) if logs else "暂无收包日志"
-    return status_text, logs, log_text, recv_error
+    try:
+        logs_payload = api_request("GET", "/api/serial-debug/logs", params={"last_seq": max(seq, 0), "limit": 400})
+        entries = logs_payload.get("entries", [])
+        next_seq = int(logs_payload.get("next_seq", seq))
 
+        if not clear_requested:
+            for entry in entries:
+                if isinstance(entry, dict):
+                    logs.append(_format_serial_log_entry(entry))
+            if len(logs) > 300:
+                logs = logs[-300:]
+        seq = next_seq
+    except Exception as exc:
+        if recv_error:
+            recv_error = f"{recv_error}; 日志拉取失败: {exc}"
+        else:
+            recv_error = f"日志拉取失败: {exc}"
+
+    status_view = _build_serial_status_view(status)
+    log_text = "\n".join(logs) if logs else "暂无串口日志"
+    return status_view, logs, log_text, recv_error, seq
 
 if __name__ == "__main__":
     app.run(host=settings.frontend_host, port=settings.frontend_port, debug=True)

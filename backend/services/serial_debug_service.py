@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from collections import deque
 from typing import Any
 
 try:
@@ -26,6 +27,8 @@ class SerialDebugService:
         self._lock = asyncio.Lock()
         self._last_error: str | None = None
         self._settings: dict[str, Any] = {}
+        self._logs: deque[dict[str, Any]] = deque(maxlen=1000)
+        self._log_seq = 0
 
     async def list_ports(self) -> list[dict[str, Any]]:
         if list_ports is None:
@@ -81,9 +84,15 @@ class SerialDebugService:
                     "timeout_ms": timeout_ms,
                 }
                 self._last_error = None
+                self._append_log(
+                    direction="SYS",
+                    payload=b"",
+                    display_text=f"Connected: {port} {baudrate}/{bytesize}/{parity}/{stopbits}",
+                )
             except Exception as exc:
                 self._ser = None
                 self._last_error = str(exc)
+                self._append_log(direction="ERR", payload=b"", display_text=f"Open failed: {exc}")
                 raise RuntimeError(f"open failed: {exc}") from exc
 
             return await self._status_unlocked()
@@ -109,6 +118,7 @@ class SerialDebugService:
             )
             sent = ser.write(payload)
             ser.flush()
+            self._append_log(direction="TX", payload=payload, display_text=self._render_payload_text(payload, encoding))
             return {
                 "ok": True,
                 "bytes_sent": sent,
@@ -141,6 +151,9 @@ class SerialDebugService:
             finally:
                 ser.timeout = original_timeout
 
+            if payload:
+                self._append_log(direction="RX", payload=payload, display_text=self._render_payload_text(payload, encoding))
+
             return {
                 "ok": True,
                 "bytes_read": len(payload),
@@ -149,13 +162,37 @@ class SerialDebugService:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
+    async def pull_logs(self, *, last_seq: int, limit: int = 200) -> dict[str, Any]:
+        if limit <= 0:
+            limit = 1
+        if limit > 500:
+            limit = 500
+
+        async with self._lock:
+            if last_seq < 0:
+                last_seq = 0
+
+            entries = [item for item in self._logs if int(item.get("seq", 0)) > last_seq]
+            if len(entries) > limit:
+                entries = entries[-limit:]
+
+            return {
+                "ok": True,
+                "entries": entries,
+                "next_seq": self._log_seq,
+            }
+
     async def _close_unlocked(self) -> None:
+        previous_port = self._settings.get("port")
+        was_connected = bool(self._ser is not None and getattr(self._ser, "is_open", False))
         if self._ser is not None:
             try:
                 self._ser.close()
             except Exception:
                 pass
         self._ser = None
+        if was_connected and previous_port:
+            self._append_log(direction="SYS", payload=b"", display_text=f"Disconnected: {previous_port}")
 
     async def _status_unlocked(self) -> dict[str, Any]:
         connected = bool(self._ser is not None and getattr(self._ser, "is_open", False))
@@ -189,6 +226,27 @@ class SerialDebugService:
         if ending is None:
             raise ValueError(f"unsupported line_ending: {line_ending}")
         return raw + ending
+
+    def _append_log(self, *, direction: str, payload: bytes, display_text: str = "") -> None:
+        self._log_seq += 1
+        self._logs.append(
+            {
+                "seq": self._log_seq,
+                "direction": direction,
+                "bytes": len(payload),
+                "text": display_text,
+                "hex": payload.hex(" "),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    def _render_payload_text(self, payload: bytes, encoding: str) -> str:
+        if not payload:
+            return ""
+        try:
+            return payload.decode(encoding, errors="replace")
+        except LookupError:
+            return payload.decode("utf-8", errors="replace")
 
 
 serial_debug_service = SerialDebugService()
