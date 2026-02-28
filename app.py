@@ -13,6 +13,8 @@ import requests
 import uvicorn
 import dash
 from dash import Dash, Input, Output, State, dcc, html, no_update, ALL
+from dash.exceptions import PreventUpdate
+from dash_extensions import WebSocket
 
 from config.settings import settings
 from frontend.components.device_card import device_card
@@ -35,6 +37,8 @@ RETRYABLE_STATUS_CODES = {502, 503, 504}
 _BACKEND_THREAD: threading.Thread | None = None
 API_SESSION = requests.Session()
 API_SESSION.trust_env = False
+DASHBOARD_MAX_REFRESH_HZ = 10.0
+DASHBOARD_MIN_RENDER_INTERVAL = 1.0 / DASHBOARD_MAX_REFRESH_HZ
 
 DEFAULT_CONNECTION_BY_PROTOCOL: dict[str, dict[str, Any]] = {
     "modbus_tcp": {"host": "127.0.0.1", "port": 502},
@@ -175,6 +179,11 @@ def _backend_health_url() -> str:
     return f"{BACKEND_BASE}/health"
 
 
+def _dashboard_ws_url() -> str:
+    host = _backend_probe_host()
+    return f"ws://{host}:{settings.backend_port}/ws?api_key={settings.api_key}"
+
+
 def _backend_probe_host() -> str:
     host = str(settings.backend_host).strip()
     if host in {"", "0.0.0.0", "::"}:
@@ -276,6 +285,81 @@ def api_request(method: str, path: str, **kwargs: Any) -> Any:
     raise RuntimeError("API request failed unexpectedly")
 
 
+def _devices_to_dashboard_map(devices: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for item in devices:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("id"))
+        if not key or key == "None":
+            continue
+        result[key] = deepcopy(item)
+    return result
+
+
+def _dashboard_cards_from_map(data: dict[str, dict[str, Any]]) -> list[html.Div]:
+    def sort_key(item: dict[str, Any]) -> tuple[int, str]:
+        raw_id = str(item.get("id", ""))
+        try:
+            return (0, f"{int(raw_id):08d}")
+        except Exception:
+            return (1, raw_id)
+
+    ordered = sorted(data.values(), key=sort_key)
+    return [device_card(item) for item in ordered]
+
+
+def _parse_dashboard_ws_message(message: Any) -> dict[str, Any] | None:
+    payload: Any = message
+    if isinstance(payload, dict) and "data" in payload:
+        payload = payload.get("data")
+
+    if isinstance(payload, bytes):
+        try:
+            payload = payload.decode("utf-8")
+        except Exception:
+            return None
+
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return None
+
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+
+def _merge_dashboard_weight_update(
+    data: dict[str, dict[str, Any]],
+    update: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    device_id = update.get("device_id")
+    if device_id is None:
+        return data
+
+    key = str(device_id)
+    base = deepcopy(data.get(key, {}))
+    base["id"] = int(device_id) if str(device_id).isdigit() else device_id
+    base["name"] = str(update.get("device_name") or base.get("name") or f"Device {device_id}")
+
+    runtime = deepcopy(base.get("runtime") or {})
+    runtime["status"] = update.get("status", runtime.get("status", "offline"))
+    runtime["weight"] = update.get("weight", runtime.get("weight"))
+    runtime["unit"] = update.get("unit", runtime.get("unit", "kg"))
+    runtime["timestamp"] = update.get("timestamp", runtime.get("timestamp"))
+    runtime["error"] = update.get("error", runtime.get("error"))
+    base["runtime"] = runtime
+
+    merged = dict(data)
+    merged[key] = base
+    return merged
+
+
 def default_variables_from_template(template: dict[str, Any]) -> dict[str, Any]:
     variables = template.get("variables", [])
     if not isinstance(variables, list):
@@ -349,45 +433,130 @@ app.layout = html.Div(
                 dcc.Tab(label="串口调试", value="serial_debug"),
             ],
         ),
-        html.Div(id="tab-content", style={"marginTop": "12px"}),
+        dcc.Store(id="devices-refresh-signal", data=0),
+        dcc.Store(id="protocols-refresh-signal", data=0),
+        WebSocket(id="dashboard-ws", url=_dashboard_ws_url()),
+        html.Div(id="page-dashboard", children=dashboard_page.layout(), style={"display": "block", "marginTop": "12px"}),
+        html.Div(id="page-devices", children=device_config_page.layout(), style={"display": "none", "marginTop": "12px"}),
+        html.Div(id="page-control", children=manual_control_page.layout(), style={"display": "none", "marginTop": "12px"}),
+        html.Div(id="page-protocols", children=protocol_editor_page.layout(), style={"display": "none", "marginTop": "12px"}),
+        html.Div(id="page-serial-debug", children=serial_debug_page.layout(), style={"display": "none", "marginTop": "12px"}),
     ],
     style={"maxWidth": "1200px", "margin": "0 auto", "padding": "16px"},
 )
 
 
-@app.callback(Output("tab-content", "children"), Input("main-tabs", "value"))
-def render_tab_content(tab: str):
-    if tab == "devices":
-        return device_config_page.layout()
-    if tab == "control":
-        return manual_control_page.layout()
-    if tab == "protocols":
-        return protocol_editor_page.layout()
-    if tab == "serial_debug":
-        return serial_debug_page.layout()
-    return dashboard_page.layout()
+@app.callback(
+    Output("page-dashboard", "style"),
+    Output("page-devices", "style"),
+    Output("page-control", "style"),
+    Output("page-protocols", "style"),
+    Output("page-serial-debug", "style"),
+    Output("dashboard-interval", "disabled"),
+    Output("devices-interval", "disabled"),
+    Output("control-interval", "disabled"),
+    Output("protocols-interval", "disabled"),
+    Output("serial-debug-interval", "disabled"),
+    Output("dashboard-ws", "url"),
+    Input("main-tabs", "value"),
+)
+def switch_active_tab(tab: str):
+    active_tab = str(tab or "dashboard")
+    return (
+        {"display": "block" if active_tab == "dashboard" else "none", "marginTop": "12px"},
+        {"display": "block" if active_tab == "devices" else "none", "marginTop": "12px"},
+        {"display": "block" if active_tab == "control" else "none", "marginTop": "12px"},
+        {"display": "block" if active_tab == "protocols" else "none", "marginTop": "12px"},
+        {"display": "block" if active_tab == "serial_debug" else "none", "marginTop": "12px"},
+        active_tab != "dashboard",
+        active_tab != "devices",
+        active_tab != "control",
+        active_tab != "protocols",
+        active_tab != "serial_debug",
+        _dashboard_ws_url() if active_tab == "dashboard" else "",
+    )
 
 
 @app.callback(
     Output("dashboard-cards", "children"),
     Output("dashboard-error", "children"),
+    Output("dashboard-live-store", "data"),
+    Output("dashboard-ws-status", "children"),
+    Output("dashboard-last-render-ts", "data"),
+    Input("dashboard-ws", "message"),
     Input("dashboard-interval", "n_intervals"),
+    Input("devices-refresh-signal", "data"),
+    Input("main-tabs", "value"),
+    State("dashboard-live-store", "data"),
+    State("dashboard-last-render-ts", "data"),
 )
-def refresh_dashboard(_n: int):
+def refresh_dashboard(
+    ws_message: Any,
+    _n: int,
+    _devices_refresh: Any,
+    active_tab: Any,
+    live_store: Any,
+    last_render_ts: Any,
+):
+    if str(active_tab or "") != "dashboard":
+        raise PreventUpdate
+
+    ctx = dash.callback_context
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else ""
+    current_store = deepcopy(live_store) if isinstance(live_store, dict) else {}
+
     try:
-        devices = api_request("GET", "/api/devices")
-        cards = [device_card(item) for item in devices]
-        return cards, ""
-    except Exception as exc:
-        return [], f"加载失败: {exc}"
+        last_ts = float(last_render_ts or 0.0)
+    except Exception:
+        last_ts = 0.0
+
+    if triggered_id in {"main-tabs", "dashboard-interval", "devices-refresh-signal"}:
+        try:
+            devices = api_request("GET", "/api/devices")
+            current_store = _devices_to_dashboard_map(devices)
+            cards = _dashboard_cards_from_map(current_store)
+            return (
+                cards,
+                "",
+                current_store,
+                "WebSocket实时推送中，轮询10秒兜底同步",
+                time.monotonic(),
+            )
+        except Exception as exc:
+            cards = _dashboard_cards_from_map(current_store)
+            return cards, f"加载失败: {exc}", current_store, "WebSocket重连中，已切到兜底数据", last_ts
+
+    if triggered_id == "dashboard-ws":
+        payload = _parse_dashboard_ws_message(ws_message)
+        if payload is None:
+            return no_update, no_update, no_update, no_update, last_ts
+
+        msg_type = str(payload.get("type", "")).lower()
+        if msg_type == "ping":
+            return no_update, no_update, no_update, "WebSocket心跳正常", last_ts
+        if msg_type != "weight_update":
+            return no_update, no_update, no_update, no_update, last_ts
+
+        current_store = _merge_dashboard_weight_update(current_store, payload)
+        now_ts = time.monotonic()
+        if now_ts - last_ts >= DASHBOARD_MIN_RENDER_INTERVAL:
+            cards = _dashboard_cards_from_map(current_store)
+            return cards, "", current_store, "WebSocket实时推送中（<=10次/秒）", now_ts
+        return no_update, no_update, current_store, "WebSocket实时推送中（<=10次/秒）", last_ts
+
+    return no_update, no_update, no_update, no_update, last_ts
 
 
 @app.callback(
     Output("devices-table", "children"),
     Output("devices-error", "children"),
     Input("devices-interval", "n_intervals"),
+    Input("devices-refresh-signal", "data"),
+    Input("main-tabs", "value"),
 )
-def refresh_devices(_n: int):
+def refresh_devices(_n: int, _devices_refresh: Any, active_tab: Any):
+    if str(active_tab or "") != "devices":
+        raise PreventUpdate
     try:
         devices = api_request("GET", "/api/devices")
     except Exception as exc:
@@ -451,9 +620,13 @@ def refresh_devices(_n: int):
     Output("device-template-id", "options"),
     Output("device-template-id", "value"),
     Input("devices-interval", "n_intervals"),
+    Input("protocols-refresh-signal", "data"),
+    Input("main-tabs", "value"),
     State("device-template-id", "value"),
 )
-def load_device_template_options(_n: int, current_value: Any):
+def load_device_template_options(_n: int, _protocols_refresh: Any, active_tab: Any, current_value: Any):
+    if str(active_tab or "") != "devices":
+        raise PreventUpdate
     try:
         protocols = api_request("GET", "/api/protocols")
     except Exception:
@@ -585,13 +758,35 @@ def delete_device(clicks: list[int]):
 
 
 @app.callback(
+    Output("devices-refresh-signal", "data"),
+    Input("create-device-result", "children"),
+    Input("delete-device-result", "children"),
+    prevent_initial_call=True,
+)
+def trigger_devices_refresh(create_result: Any, delete_result: Any):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    text = str(create_result or "") if triggered_id == "create-device-result" else str(delete_result or "")
+    if "device_id=" not in text:
+        raise PreventUpdate
+    return time.time()
+
+
+@app.callback(
     Output("control-device-id", "options"),
     Output("control-device-id", "value"),
     Output("control-error", "children"),
     Input("control-interval", "n_intervals"),
+    Input("devices-refresh-signal", "data"),
+    Input("main-tabs", "value"),
     State("control-device-id", "value"),
 )
-def refresh_control_devices(_n: int, current_value: Any):
+def refresh_control_devices(_n: int, _devices_refresh: Any, active_tab: Any, current_value: Any):
+    if str(active_tab or "") != "control":
+        raise PreventUpdate
     try:
         devices = api_request("GET", "/api/devices")
     except Exception as exc:
@@ -745,9 +940,20 @@ def execute_manual_command(
     Output("protocol-edit-id", "options"),
     Output("protocol-edit-id", "value"),
     Input("protocols-interval", "n_intervals"),
+    Input("protocols-refresh-signal", "data"),
+    Input("devices-refresh-signal", "data"),
+    Input("main-tabs", "value"),
     State("protocol-edit-id", "value"),
 )
-def refresh_protocols(_n: int, current_edit_id: Any):
+def refresh_protocols(
+    _n: int,
+    _protocols_refresh: Any,
+    _devices_refresh: Any,
+    active_tab: Any,
+    current_edit_id: Any,
+):
+    if str(active_tab or "") != "protocols":
+        raise PreventUpdate
     try:
         protocols = api_request("GET", "/api/protocols")
         devices = api_request("GET", "/api/devices")
@@ -946,6 +1152,24 @@ def update_or_delete_protocol(
         return f"更新失败: {exc}"
 
 
+@app.callback(
+    Output("protocols-refresh-signal", "data"),
+    Input("create-protocol-result", "children"),
+    Input("protocol-edit-result", "children"),
+    prevent_initial_call=True,
+)
+def trigger_protocols_refresh(create_result: Any, edit_result: Any):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    text = str(create_result or "") if triggered_id == "create-protocol-result" else str(edit_result or "")
+    if "protocol_id=" not in text:
+        raise PreventUpdate
+    return time.time()
+
+
 def _normalize_serial_log_text(text: str) -> str:
     return text.replace("\r", "\\r").replace("\n", "\\n")
 
@@ -1120,10 +1344,13 @@ def send_serial_debug_data(
     Output("serial-debug-log-seq-store", "data"),
     Input("serial-debug-interval", "n_intervals"),
     Input("serial-debug-clear-log-btn", "n_clicks"),
+    Input("main-tabs", "value"),
     State("serial-debug-log-store", "data"),
     State("serial-debug-log-seq-store", "data"),
 )
-def refresh_serial_debug_runtime(_n: int, _clear_clicks: int, stored_logs: Any, log_seq: Any):
+def refresh_serial_debug_runtime(_n: int, _clear_clicks: int, active_tab: Any, stored_logs: Any, log_seq: Any):
+    if str(active_tab or "") != "serial_debug":
+        raise PreventUpdate
     logs: list[str] = []
     if isinstance(stored_logs, list):
         logs = [str(item) for item in stored_logs]
@@ -1180,26 +1407,35 @@ def refresh_serial_debug_runtime(_n: int, _clear_clicks: int, stored_logs: Any, 
     return status_view, logs, log_text, recv_error, seq
 
 if __name__ == "__main__":
+    # `EMBED_BACKEND=true` 时，`python app.py` 会同时拉起后端和前端。
+    # 目标是本地调试“一条命令启动”，避免手动开两个终端。
     if EMBED_BACKEND:
+        # 先探测一次后端健康状态。
+        # 如果你已经单独启动了后端，这里会直接复用，不重复起进程。
         if _backend_ready():
             LOGGER.info("Backend already reachable at %s", BACKEND_BASE)
         else:
+            # 后端未就绪时，在当前进程里用后台线程启动 Uvicorn。
             LOGGER.info("Starting embedded backend on %s", BACKEND_BASE)
             _start_embedded_backend()
+            # 启动后等待一段时间，避免前端先起来导致首屏请求失败。
             if _wait_backend_ready(EMBED_BACKEND_WAIT_SECONDS):
                 LOGGER.info("Embedded backend is ready")
             else:
+                # 如果线程已经退出，说明后端启动失败，直接抛错终止。
                 backend_thread_alive = bool(_BACKEND_THREAD and _BACKEND_THREAD.is_alive())
                 if not backend_thread_alive:
                     raise RuntimeError(
                         "Embedded backend exited before becoming ready at "
                         f"{BACKEND_BASE}. Please check backend startup logs."
                     )
+                # 线程还活着但健康检查未通过：继续启动前端，并打印告警辅助排查。
                 LOGGER.warning(
                     "Embedded backend health probe timed out after %.1fs, but backend thread is alive; "
                     "frontend will continue to start.",
                     EMBED_BACKEND_WAIT_SECONDS,
                 )
+        # 内嵌后端模式下关闭 reloader，避免 Dash debug 重载导致后端被重复拉起。
         app.run(
             host=settings.frontend_host,
             port=settings.frontend_port,
@@ -1207,6 +1443,7 @@ if __name__ == "__main__":
             use_reloader=False,
         )
     else:
+        # 不内嵌后端时，前端只做连通性提示，不负责启动后端进程。
         if not _backend_ready():
             LOGGER.warning("Backend is not reachable at %s", BACKEND_BASE)
         app.run(host=settings.frontend_host, port=settings.frontend_port, debug=True)
