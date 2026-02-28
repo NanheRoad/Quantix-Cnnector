@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,6 +19,9 @@ from peewee import (
 from backend.database.connection import database_proxy
 
 
+DEVICE_CODE_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9_-]{0,63}$")
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -28,6 +32,19 @@ def to_iso(value: Any) -> str | None:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+def normalize_device_code(value: Any) -> str:
+    code = str(value or "").strip().upper()
+    if not code:
+        raise ValueError("device_code is required")
+    if not DEVICE_CODE_PATTERN.fullmatch(code):
+        raise ValueError("device_code must match ^[A-Z0-9][A-Z0-9_-]{0,63}$")
+    return code
+
+
+def build_default_device_code(device_id: int) -> str:
+    return f"DEV-{int(device_id):06d}"
 
 
 class JSONField(TextField):
@@ -88,6 +105,7 @@ class ProtocolTemplate(BaseModel):
 
 class Device(BaseModel):
     id = AutoField()
+    device_code = CharField(max_length=64, unique=True)
     name = CharField(max_length=100, unique=True)
     protocol_template = ForeignKeyField(ProtocolTemplate, backref="devices", on_delete="CASCADE")
     connection_params = JSONField()
@@ -101,12 +119,14 @@ class Device(BaseModel):
         table_name = "devices"
 
     def save(self, *args: Any, **kwargs: Any) -> int:
+        self.device_code = normalize_device_code(self.device_code)
         self.updated_at = utcnow()
         return super().save(*args, **kwargs)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "device_code": self.device_code,
             "name": self.name,
             "protocol_template_id": self.protocol_template_id,
             "connection_params": self.connection_params,

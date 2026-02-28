@@ -21,7 +21,10 @@ def layout() -> html.Div:
         [
             dcc.Interval(id="devices-interval", interval=3000, n_intervals=0),
             html.H2("设备配置"),
-            html.Div("说明：设备创建时先选择协议模板，系统会自动填充连接参数与模板变量。", style={"fontSize": "13px", "color": "#444", "marginBottom": "10px"}),
+            html.Div(
+                "说明：创建设备时先选择协议模板，系统会自动填充连接参数与模板变量。",
+                style={"fontSize": "13px", "color": "#444", "marginBottom": "10px"},
+            ),
             html.Div(id="devices-error", style={"color": "#c62828", "marginBottom": "8px"}),
             html.Div(id="devices-table", style={"marginBottom": "20px"}),
             html.Div(id="delete-device-result", style={"color": "#16a34a", "marginBottom": "10px", "fontWeight": "500"}),
@@ -32,7 +35,14 @@ def layout() -> html.Div:
                         [
                             html.Label("设备名称"),
                             dcc.Input(id="device-name", type="text", className="qx-input", style={"width": "100%"}),
-                            help_text("示例：电子台秤-01，用于大屏和日志标识。"),
+                            help_text("示例：电子台秤01，用于大屏和日志标识。"),
+                        ]
+                    ),
+                    field_block(
+                        [
+                            html.Label("设备编号"),
+                            dcc.Input(id="device-code", type="text", className="qx-input", style={"width": "100%"}),
+                            help_text("唯一标识，建议仅用大写字母、数字、下划线或短横线，例如 SCALE_01。"),
                         ]
                     ),
                     field_block(
@@ -60,7 +70,7 @@ def layout() -> html.Div:
                                 className="qx-input",
                                 style={"width": "100%"},
                             ),
-                            help_text("请输入每秒采集次数。系统内部会转换为采集间隔：间隔(秒)=1/频率。"),
+                            help_text("请输入每秒采集次数。系统会转换为采集间隔：间隔(秒)=1/频率。"),
                         ]
                     ),
                     field_block(
@@ -79,27 +89,50 @@ def layout() -> html.Div:
                 ],
                 style={"display": "grid", "gridTemplateColumns": "repeat(2, 1fr)", "gap": "12px"},
             ),
-            html.Div(id="device-template-help", style={"marginTop": "10px", "padding": "10px", "background": "#f8fafc", "border": "1px solid #e2e8f0", "borderRadius": "8px"}),
+            html.Div(
+                id="device-template-help",
+                style={
+                    "marginTop": "10px",
+                    "padding": "10px",
+                    "background": "#f8fafc",
+                    "border": "1px solid #e2e8f0",
+                    "borderRadius": "8px",
+                },
+            ),
             html.Div(
                 [
                     html.Div(
                         [
                             html.Label("连接参数（JSON）"),
-                            dcc.Textarea(id="device-conn", value='{"host":"127.0.0.1","port":502}', style={"width": "100%", "height": "140px"}),
+                            dcc.Textarea(
+                                id="device-conn",
+                                value='{"host":"127.0.0.1","port":502}',
+                                style={"width": "100%", "height": "140px"},
+                            ),
                             help_text("系统会根据模板自动填充示例，可按现场网络/串口参数调整。"),
                         ]
                     ),
                     html.Div(
                         [
                             html.Label("模板变量（JSON）"),
-                            dcc.Textarea(id="device-vars", value='{"slave_id":1,"address":0}', style={"width": "100%", "height": "140px"}),
-                            help_text("变量来源于模板定义，例如 slave_id、寄存器地址、topic。"),
+                            dcc.Textarea(
+                                id="device-vars",
+                                value='{"slave_id":1,"address":0}',
+                                style={"width": "100%", "height": "140px"},
+                            ),
+                            help_text("变量来自模板定义，例如 slave_id、寄存器地址、topic。"),
                         ]
                     ),
                 ],
                 style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "12px", "marginTop": "12px"},
             ),
-            html.Button("创建", id="create-device-btn", n_clicks=0, style={"marginTop": "12px"}),
+            html.Button(
+                "创建",
+                id="create-device-btn",
+                n_clicks=0,
+                className="qx-btn qx-btn-primary",
+                style={"marginTop": "12px"},
+            ),
             html.Div(id="create-device-result", style={"marginTop": "8px"}),
         ]
     )

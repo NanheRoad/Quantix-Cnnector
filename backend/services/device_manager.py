@@ -59,7 +59,7 @@ class DeviceManager:
             device=device,
             template=template,
             driver=build_driver(template.protocol_type, device.connection_params),
-            state=RuntimeState(device_id=device.id, device_name=device.name),
+            state=RuntimeState(device_id=device.id, device_name=device.name, device_code=device.device_code),
             stop_event=asyncio.Event(),
         )
 

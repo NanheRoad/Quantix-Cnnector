@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8000, help="Quantix backend port")
     parser.add_argument("--api-key", default="quantix-dev-key", help="API key for /ws")
     parser.add_argument("--device-id", type=int, default=None, help="Only show one device")
+    parser.add_argument("--device-code", default=None, help="Only show one device by device_code")
     parser.add_argument("--show-ping", action="store_true", help="Print ping messages")
     parser.add_argument("--raw", action="store_true", help="Print raw JSON message")
     parser.add_argument("--wss", action="store_true", help="Use wss:// instead of ws://")
@@ -51,6 +52,7 @@ def build_ws_url(host: str, port: int, api_key: str, use_wss: bool) -> str:
 async def run_subscriber(
     url: str,
     device_id: int | None,
+    device_code: str | None,
     show_ping: bool,
     show_raw: bool,
 ) -> None:
@@ -86,7 +88,10 @@ async def run_subscriber(
                         continue
 
                     current_device_id = message.get("device_id")
+                    current_device_code = message.get("device_code")
                     if device_id is not None and current_device_id != device_id:
+                        continue
+                    if device_code is not None and str(current_device_code or "").upper() != device_code.upper():
                         continue
 
                     ts = format_timestamp(message.get("timestamp"))
@@ -97,7 +102,7 @@ async def run_subscriber(
                     error = message.get("error")
 
                     line = (
-                        f"[{ts}] device_id={current_device_id} name={name} "
+                        f"[{ts}] device_id={current_device_id} device_code={current_device_code} name={name} "
                         f"status={status} weight={weight} {unit}"
                     )
                     if error:
@@ -118,6 +123,7 @@ async def main() -> None:
     await run_subscriber(
         url=url,
         device_id=args.device_id,
+        device_code=args.device_code,
         show_ping=args.show_ping,
         show_raw=args.raw,
     )

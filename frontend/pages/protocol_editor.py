@@ -98,7 +98,13 @@ def layout() -> html.Div:
                 ],
                 style={"marginTop": "8px"},
             ),
-            html.Button("创建模板", id="create-protocol-btn", n_clicks=0, style={"marginTop": "12px"}),
+            html.Button(
+                "创建模板",
+                id="create-protocol-btn",
+                n_clicks=0,
+                className="qx-btn qx-btn-primary",
+                style={"marginTop": "12px"},
+            ),
             html.Div(id="create-protocol-result", style={"marginTop": "8px"}),
             html.Hr(style={"margin": "20px 0"}),
             html.H3("编辑或删除模板"),
@@ -175,19 +181,8 @@ def layout() -> html.Div:
             ),
             html.Div(
                 [
-                    html.Button("更新模板", id="protocol-update-btn", n_clicks=0, style={"padding": "8px 14px"}),
-                    html.Button(
-                        "删除模板",
-                        id="protocol-delete-btn",
-                        n_clicks=0,
-                        style={
-                            "padding": "8px 14px",
-                            "backgroundColor": "#b91c1c",
-                            "color": "white",
-                            "border": "none",
-                            "borderRadius": "6px",
-                        },
-                    ),
+                    html.Button("更新模板", id="protocol-update-btn", n_clicks=0, className="qx-btn qx-btn-secondary"),
+                    html.Button("删除模板", id="protocol-delete-btn", n_clicks=0, className="qx-btn qx-btn-danger"),
                 ],
                 style={"display": "flex", "gap": "10px", "marginTop": "10px"},
             ),

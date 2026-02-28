@@ -9,6 +9,7 @@ from typing import Any
 class RuntimeState:
     device_id: int
     device_name: str
+    device_code: str | None = None
     status: str = "offline"
     weight: float | None = None
     unit: str = "kg"
@@ -21,6 +22,7 @@ class RuntimeState:
             "type": "weight_update",
             "device_id": self.device_id,
             "device_name": self.device_name,
+            "device_code": self.device_code,
             "weight": self.weight,
             "unit": self.unit,
             "timestamp": self.last_update,

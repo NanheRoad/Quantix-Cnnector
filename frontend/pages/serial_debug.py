@@ -164,9 +164,9 @@ def layout() -> html.Div:
             ),
             html.Div(
                 [
-                    html.Button("刷新串口", id="serial-debug-refresh-btn", n_clicks=0, style={"padding": "8px 14px"}),
-                    html.Button("连接", id="serial-debug-open-btn", n_clicks=0, style={"padding": "8px 14px"}),
-                    html.Button("断开", id="serial-debug-close-btn", n_clicks=0, style={"padding": "8px 14px"}),
+                    html.Button("刷新串口", id="serial-debug-refresh-btn", n_clicks=0, className="qx-btn qx-btn-soft"),
+                    html.Button("连接", id="serial-debug-open-btn", n_clicks=0, className="qx-btn qx-btn-primary"),
+                    html.Button("断开", id="serial-debug-close-btn", n_clicks=0, className="qx-btn qx-btn-danger"),
                 ],
                 style={"display": "flex", "gap": "10px", "marginTop": "10px"},
             ),
@@ -224,21 +224,27 @@ def layout() -> html.Div:
             dcc.Textarea(
                 id="serial-debug-send-data",
                 value="",
-                placeholder="输入要发送的数据（文本或HEX）",
+                placeholder="输入要发送的数据（文本或 HEX）",
                 style={"width": "100%", "height": "110px", "marginTop": "8px"},
                 persistence=True,
                 persistence_type="session",
             ),
             html.Div(
                 [
-                    html.Button("发送", id="serial-debug-send-btn", n_clicks=0, style={"padding": "8px 14px"}),
+                    html.Button("发送", id="serial-debug-send-btn", n_clicks=0, className="qx-btn qx-btn-secondary"),
                     html.Div(id="serial-debug-send-result", style={"color": "#0f766e"}),
                 ],
                 style={"display": "flex", "alignItems": "center", "gap": "12px", "marginTop": "8px"},
             ),
             html.H3("接收日志"),
             html.Div(id="serial-debug-recv-error", style={"color": "#c62828", "marginBottom": "6px"}),
-            html.Button("清空日志", id="serial-debug-clear-log-btn", n_clicks=0, style={"padding": "6px 12px", "marginBottom": "8px"}),
+            html.Button(
+                "清空日志",
+                id="serial-debug-clear-log-btn",
+                n_clicks=0,
+                className="qx-btn qx-btn-neutral",
+                style={"marginBottom": "8px"},
+            ),
             html.Pre(
                 id="serial-debug-log",
                 children="暂无串口日志",

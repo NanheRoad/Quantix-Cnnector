@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -345,6 +345,7 @@ def _merge_dashboard_weight_update(
     key = str(device_id)
     base = deepcopy(data.get(key, {}))
     base["id"] = int(device_id) if str(device_id).isdigit() else device_id
+    base["device_code"] = str(update.get("device_code") or base.get("device_code") or "")
     base["name"] = str(update.get("device_name") or base.get("name") or f"Device {device_id}")
 
     runtime = deepcopy(base.get("runtime") or {})
@@ -564,13 +565,14 @@ def refresh_devices(_n: int, _devices_refresh: Any, active_tab: Any):
 
     columns = [
         ("ID", "6%"),
-        ("名称", "14%"),
+        ("设备编号", "12%"),
+        ("名称", "12%"),
         ("模板ID", "10%"),
         ("状态", "10%"),
         ("重量", "10%"),
-        ("更新时间", "28%"),
+        ("更新时间", "24%"),
         ("启用", "8%"),
-        ("操作", "14%"),
+        ("操作", "8%"),
     ]
     header = html.Tr([html.Th(title, style={"width": width}) for title, width in columns])
 
@@ -582,6 +584,7 @@ def refresh_devices(_n: int, _devices_refresh: Any, active_tab: Any):
             html.Tr(
                 [
                     html.Td(device_id),
+                    html.Td(item.get("device_code") or "-"),
                     html.Td(item.get("name")),
                     html.Td(item.get("protocol_template_id")),
                     html.Td(runtime.get("status", "offline")),
@@ -593,15 +596,7 @@ def refresh_devices(_n: int, _devices_refresh: Any, active_tab: Any):
                             "删除",
                             id={"type": "delete-device-btn", "index": device_id},
                             n_clicks=0,
-                            style={
-                                "padding": "4px 12px",
-                                "backgroundColor": "#dc2626",
-                                "color": "white",
-                                "border": "none",
-                                "borderRadius": "4px",
-                                "cursor": "pointer",
-                                "fontSize": "12px",
-                            },
+                            className="qx-btn qx-btn-danger qx-btn-sm",
                         ),
                         style={"textAlign": "center"},
                     ),
@@ -687,6 +682,7 @@ def update_device_template_info(template_id: Any):
     Output("create-device-result", "children"),
     Input("create-device-btn", "n_clicks"),
     State("device-name", "value"),
+    State("device-code", "value"),
     State("device-template-id", "value"),
     State("device-poll", "value"),
     State("device-enabled", "value"),
@@ -697,6 +693,7 @@ def update_device_template_info(template_id: Any):
 def create_device(
     _n: int,
     name: str,
+    device_code: str,
     template_id: int,
     poll_rate_hz: float,
     enabled: str,
@@ -704,12 +701,16 @@ def create_device(
     variables_json: str,
 ):
     try:
+        if not str(device_code or "").strip():
+            return "创建失败: 设备编号不能为空"
+
         rate = float(poll_rate_hz or 0)
         if rate <= 0:
             return "创建失败: 采集频率必须大于 0（单位：次/秒）"
 
         poll_interval = 1.0 / rate
         payload = {
+            "device_code": str(device_code),
             "name": name,
             "protocol_template_id": int(template_id),
             "connection_params": json.loads(connection_json or "{}"),
@@ -718,7 +719,7 @@ def create_device(
             "enabled": str(enabled).lower() == "true",
         }
         created = api_request("POST", "/api/devices", json=payload)
-        return f"创建成功: device_id={created['id']}"
+        return f"创建成功: device_id={created['id']}, code={created.get('device_code', '-')}"
     except Exception as exc:
         return f"创建失败: {exc}"
 
@@ -795,7 +796,10 @@ def refresh_control_devices(_n: int, _devices_refresh: Any, active_tab: Any, cur
     enabled_devices = [item for item in devices if item.get("enabled")]
     options = [
         {
-            "label": f"#{item['id']} {item['name']} ({item.get('runtime', {}).get('status', 'offline')})",
+            "label": (
+                f"#{item['id']} [{item.get('device_code') or '-'}] "
+                f"{item['name']} ({item.get('runtime', {}).get('status', 'offline')})"
+            ),
             "value": item["id"],
         }
         for item in enabled_devices
@@ -842,7 +846,7 @@ def load_control_manual_steps(device_id: Any):
 
     info = html.Div(
         [
-            html.Div(f"设备：#{device['id']} {device['name']}"),
+            html.Div(f"设备：#{device['id']} [{device.get('device_code') or '-'}] {device['name']}"),
             html.Div(f"手动步骤数量：{len(step_options)}"),
             html.Div(f"快捷去皮：{tare_step_id or '未匹配'}"),
             html.Div(f"快捷清零：{zero_step_id or '未匹配'}"),
@@ -887,7 +891,7 @@ def execute_manual_command(
         return f"执行失败: 参数 JSON 格式错误: {exc}", ""
 
     if not isinstance(params, dict):
-        return "执行失败: 参数必须是 JSON 对象，例如 {\"value\":1}。", ""
+        return "执行失败: 参数必须是 JSON 对象，例如 {\"value\":1}", ""
 
     manual_steps: list[dict[str, str]] = []
     if isinstance(manual_steps_data, list):
@@ -910,12 +914,12 @@ def execute_manual_command(
         command_name = "去皮"
         target_step_id = find_quick_step_id(manual_steps, "tare")
         if not target_step_id:
-            return "执行失败: 未匹配到“去皮”手动步骤，请在模板中配置 trigger=manual 的去皮步骤。", ""
+            return "执行失败: 未匹配到去皮手动步骤，请在模板中配置 trigger=manual 的去皮步骤。", ""
     elif triggered_id == "control-zero-btn":
         command_name = "清零"
         target_step_id = find_quick_step_id(manual_steps, "zero")
         if not target_step_id:
-            return "执行失败: 未匹配到“清零”手动步骤，请在模板中配置 trigger=manual 的清零步骤。", ""
+            return "执行失败: 未匹配到清零手动步骤，请在模板中配置 trigger=manual 的清零步骤。", ""
     elif triggered_id == "control-execute-btn":
         if not selected_step_id:
             return "执行失败: 请先选择手动步骤。", ""
@@ -932,7 +936,6 @@ def execute_manual_command(
         return f"执行成功: {command_name} ({target_step_id})", pretty_json(result)
     except Exception as exc:
         return f"执行失败: {exc}", ""
-
 
 @app.callback(
     Output("protocols-list", "children"),
@@ -1407,35 +1410,35 @@ def refresh_serial_debug_runtime(_n: int, _clear_clicks: int, active_tab: Any, s
     return status_view, logs, log_text, recv_error, seq
 
 if __name__ == "__main__":
-    # `EMBED_BACKEND=true` 时，`python app.py` 会同时拉起后端和前端。
-    # 目标是本地调试“一条命令启动”，避免手动开两个终端。
+    # When EMBED_BACKEND=true, `python app.py` starts backend and frontend together.
+    # This keeps local debug as a one-command startup and avoids opening two terminals.
     if EMBED_BACKEND:
-        # 先探测一次后端健康状态。
-        # 如果你已经单独启动了后端，这里会直接复用，不重复起进程。
+        # Probe backend health first.
+        # If backend is already running, reuse it instead of starting a duplicate process.
         if _backend_ready():
             LOGGER.info("Backend already reachable at %s", BACKEND_BASE)
         else:
-            # 后端未就绪时，在当前进程里用后台线程启动 Uvicorn。
+            # Backend is not ready; start Uvicorn in a background thread.
             LOGGER.info("Starting embedded backend on %s", BACKEND_BASE)
             _start_embedded_backend()
-            # 启动后等待一段时间，避免前端先起来导致首屏请求失败。
+            # Wait for readiness to avoid frontend requests failing on first load.
             if _wait_backend_ready(EMBED_BACKEND_WAIT_SECONDS):
                 LOGGER.info("Embedded backend is ready")
             else:
-                # 如果线程已经退出，说明后端启动失败，直接抛错终止。
+                # If thread exited, backend startup failed; raise immediately.
                 backend_thread_alive = bool(_BACKEND_THREAD and _BACKEND_THREAD.is_alive())
                 if not backend_thread_alive:
                     raise RuntimeError(
                         "Embedded backend exited before becoming ready at "
                         f"{BACKEND_BASE}. Please check backend startup logs."
                     )
-                # 线程还活着但健康检查未通过：继续启动前端，并打印告警辅助排查。
+                # Thread is alive but health probe timed out; continue frontend startup with warning.
                 LOGGER.warning(
                     "Embedded backend health probe timed out after %.1fs, but backend thread is alive; "
                     "frontend will continue to start.",
                     EMBED_BACKEND_WAIT_SECONDS,
                 )
-        # 内嵌后端模式下关闭 reloader，避免 Dash debug 重载导致后端被重复拉起。
+        # In embedded mode, disable reloader to avoid duplicate backend starts in Dash debug.
         app.run(
             host=settings.frontend_host,
             port=settings.frontend_port,
@@ -1443,7 +1446,7 @@ if __name__ == "__main__":
             use_reloader=False,
         )
     else:
-        # 不内嵌后端时，前端只做连通性提示，不负责启动后端进程。
+        # In non-embedded mode, frontend only checks connectivity and does not start backend.
         if not _backend_ready():
             LOGGER.warning("Backend is not reachable at %s", BACKEND_BASE)
         app.run(host=settings.frontend_host, port=settings.frontend_port, debug=True)

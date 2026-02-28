@@ -53,32 +53,8 @@ def layout() -> html.Div:
             html.H3("快捷命令"),
             html.Div(
                 [
-                    html.Button(
-                        "去皮",
-                        id="control-tare-btn",
-                        n_clicks=0,
-                        style={
-                            "padding": "8px 16px",
-                            "backgroundColor": "#0f766e",
-                            "color": "white",
-                            "border": "none",
-                            "borderRadius": "6px",
-                            "cursor": "pointer",
-                        },
-                    ),
-                    html.Button(
-                        "清零",
-                        id="control-zero-btn",
-                        n_clicks=0,
-                        style={
-                            "padding": "8px 16px",
-                            "backgroundColor": "#0ea5e9",
-                            "color": "white",
-                            "border": "none",
-                            "borderRadius": "6px",
-                            "cursor": "pointer",
-                        },
-                    ),
+                    html.Button("去皮", id="control-tare-btn", n_clicks=0, className="qx-btn qx-btn-primary"),
+                    html.Button("清零", id="control-zero-btn", n_clicks=0, className="qx-btn qx-btn-secondary"),
                 ],
                 style={"display": "flex", "gap": "10px", "marginBottom": "14px"},
             ),
@@ -98,15 +74,8 @@ def layout() -> html.Div:
                 "执行自定义命令",
                 id="control-execute-btn",
                 n_clicks=0,
-                style={
-                    "marginTop": "12px",
-                    "padding": "8px 16px",
-                    "backgroundColor": "#111827",
-                    "color": "white",
-                    "border": "none",
-                    "borderRadius": "6px",
-                    "cursor": "pointer",
-                },
+                className="qx-btn qx-btn-neutral",
+                style={"marginTop": "12px"},
             ),
             html.Div(id="control-result", style={"marginTop": "10px", "fontWeight": "600"}),
             html.Pre(

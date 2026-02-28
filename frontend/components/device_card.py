@@ -16,6 +16,7 @@ def device_card(device: dict) -> html.Div:
     return html.Div(
         [
             html.Div(device.get("name", "Unnamed"), style={"fontWeight": "700", "fontSize": "18px"}),
+            html.Div(f"编号: {device.get('device_code') or '-'}", style={"fontSize": "12px", "color": "#666", "marginTop": "4px"}),
             html.Div(f"{weight if weight is not None else '--'} {unit}", style={"fontSize": "32px", "margin": "12px 0"}),
             html.Div(
                 [
