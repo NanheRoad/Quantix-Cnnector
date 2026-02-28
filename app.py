@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import socket
+import threading
+import time
 from copy import deepcopy
 from typing import Any
 
 import requests
+import uvicorn
 import dash
 from dash import Dash, Input, Output, State, dcc, html, no_update, ALL
 
@@ -19,6 +25,16 @@ from frontend.time_utils import format_timestamp
 
 BACKEND_BASE = f"http://{settings.backend_host}:{settings.backend_port}"
 HEADERS = {"X-API-Key": settings.api_key}
+LOGGER = logging.getLogger(__name__)
+EMBED_BACKEND = os.getenv("EMBED_BACKEND", "true").lower() in {"1", "true", "yes", "on"}
+EMBED_BACKEND_WAIT_SECONDS = float(os.getenv("EMBED_BACKEND_WAIT_SECONDS", "20"))
+BACKEND_HEALTH_TIMEOUT_SECONDS = float(os.getenv("BACKEND_HEALTH_TIMEOUT_SECONDS", "1.2"))
+API_RETRY_ATTEMPTS = int(os.getenv("API_RETRY_ATTEMPTS", "6"))
+API_RETRY_BACKOFF_SECONDS = float(os.getenv("API_RETRY_BACKOFF_SECONDS", "0.3"))
+RETRYABLE_STATUS_CODES = {502, 503, 504}
+_BACKEND_THREAD: threading.Thread | None = None
+API_SESSION = requests.Session()
+API_SESSION.trust_env = False
 
 DEFAULT_CONNECTION_BY_PROTOCOL: dict[str, dict[str, Any]] = {
     "modbus_tcp": {"host": "127.0.0.1", "port": 502},
@@ -155,26 +171,109 @@ def pretty_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 
-def api_request(method: str, path: str, **kwargs: Any) -> Any:
-    response = requests.request(
-        method,
-        f"{BACKEND_BASE}{path}",
-        headers=HEADERS,
-        timeout=5,
-        **kwargs,
+def _backend_health_url() -> str:
+    return f"{BACKEND_BASE}/health"
+
+
+def _backend_probe_host() -> str:
+    host = str(settings.backend_host).strip()
+    if host in {"", "0.0.0.0", "::"}:
+        return "127.0.0.1"
+    return host
+
+
+def _backend_port_open(timeout_seconds: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((_backend_probe_host(), int(settings.backend_port)), timeout=timeout_seconds):
+            return True
+    except OSError:
+        return False
+
+
+def _backend_ready(timeout_seconds: float = BACKEND_HEALTH_TIMEOUT_SECONDS) -> bool:
+    try:
+        response = API_SESSION.get(_backend_health_url(), timeout=timeout_seconds)
+        if response.status_code != 200:
+            return _backend_port_open(timeout_seconds=min(timeout_seconds, 1.0))
+        payload = response.json() if response.content else {}
+        if not isinstance(payload, dict) or payload.get("status") == "ok":
+            return True
+        return _backend_port_open(timeout_seconds=min(timeout_seconds, 1.0))
+    except Exception:
+        return _backend_port_open(timeout_seconds=min(timeout_seconds, 1.0))
+
+
+def _run_embedded_backend() -> None:
+    uvicorn.run(
+        "backend.main:app",
+        host=settings.backend_host,
+        port=settings.backend_port,
+        log_level=settings.log_level.lower(),
     )
-    if response.status_code >= 400:
-        detail = response.text
+
+
+def _start_embedded_backend() -> None:
+    global _BACKEND_THREAD
+    if _BACKEND_THREAD and _BACKEND_THREAD.is_alive():
+        return
+    _BACKEND_THREAD = threading.Thread(target=_run_embedded_backend, name="quantix-backend", daemon=True)
+    _BACKEND_THREAD.start()
+
+
+def _wait_backend_ready(max_wait_seconds: float) -> bool:
+    deadline = time.monotonic() + max_wait_seconds
+    while time.monotonic() < deadline:
+        if _backend_ready():
+            return True
+        time.sleep(0.2)
+    return _backend_ready()
+
+
+def api_request(method: str, path: str, **kwargs: Any) -> Any:
+    method_upper = str(method).upper()
+    retryable_method = method_upper in {"GET", "HEAD", "OPTIONS"}
+    max_attempts = max(API_RETRY_ATTEMPTS, 1) if retryable_method else 1
+
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
         try:
-            payload = response.json()
-            if isinstance(payload, dict):
-                detail = str(payload.get("detail") or payload)
-        except Exception:
-            pass
-        raise requests.HTTPError(f"{response.status_code} {detail}", response=response)
-    if response.content:
-        return response.json()
-    return None
+            response = API_SESSION.request(
+                method_upper,
+                f"{BACKEND_BASE}{path}",
+                headers=HEADERS,
+                timeout=5,
+                **kwargs,
+            )
+        except requests.RequestException as exc:
+            last_error = exc
+            if retryable_method and attempt < max_attempts:
+                time.sleep(API_RETRY_BACKOFF_SECONDS * attempt)
+                continue
+            raise
+
+        if response.status_code >= 400:
+            detail = response.text
+            try:
+                payload = response.json()
+                if isinstance(payload, dict):
+                    detail = str(payload.get("detail") or payload)
+            except Exception:
+                pass
+
+            http_error = requests.HTTPError(f"{response.status_code} {detail}", response=response)
+            last_error = http_error
+            if retryable_method and response.status_code in RETRYABLE_STATUS_CODES and attempt < max_attempts:
+                time.sleep(API_RETRY_BACKOFF_SECONDS * attempt)
+                continue
+            raise http_error
+
+        if response.content:
+            return response.json()
+        return None
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("API request failed unexpectedly")
 
 
 def default_variables_from_template(template: dict[str, Any]) -> dict[str, Any]:
@@ -1081,4 +1180,33 @@ def refresh_serial_debug_runtime(_n: int, _clear_clicks: int, stored_logs: Any, 
     return status_view, logs, log_text, recv_error, seq
 
 if __name__ == "__main__":
-    app.run(host=settings.frontend_host, port=settings.frontend_port, debug=True)
+    if EMBED_BACKEND:
+        if _backend_ready():
+            LOGGER.info("Backend already reachable at %s", BACKEND_BASE)
+        else:
+            LOGGER.info("Starting embedded backend on %s", BACKEND_BASE)
+            _start_embedded_backend()
+            if _wait_backend_ready(EMBED_BACKEND_WAIT_SECONDS):
+                LOGGER.info("Embedded backend is ready")
+            else:
+                backend_thread_alive = bool(_BACKEND_THREAD and _BACKEND_THREAD.is_alive())
+                if not backend_thread_alive:
+                    raise RuntimeError(
+                        "Embedded backend exited before becoming ready at "
+                        f"{BACKEND_BASE}. Please check backend startup logs."
+                    )
+                LOGGER.warning(
+                    "Embedded backend health probe timed out after %.1fs, but backend thread is alive; "
+                    "frontend will continue to start.",
+                    EMBED_BACKEND_WAIT_SECONDS,
+                )
+        app.run(
+            host=settings.frontend_host,
+            port=settings.frontend_port,
+            debug=True,
+            use_reloader=False,
+        )
+    else:
+        if not _backend_ready():
+            LOGGER.warning("Backend is not reachable at %s", BACKEND_BASE)
+        app.run(host=settings.frontend_host, port=settings.frontend_port, debug=True)

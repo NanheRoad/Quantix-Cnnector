@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Settings:
+    # SQLlite
     db_type: str = os.getenv("DB_TYPE", "sqlite").lower()
     db_name: str = os.getenv("DB_NAME", "quantix.db")
     db_user: str = os.getenv("DB_USER", "")
@@ -13,12 +14,15 @@ class Settings:
     db_host: str = os.getenv("DB_HOST", "127.0.0.1")
     db_port: int = int(os.getenv("DB_PORT", "3306"))
 
+    # API
     api_key: str = os.getenv("API_KEY", "quantix-dev-key")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
+    # 后端
     backend_host: str = os.getenv("BACKEND_HOST", "127.0.0.1")
     backend_port: int = int(os.getenv("BACKEND_PORT", "8000"))
 
+    # 前端
     frontend_host: str = os.getenv("FRONTEND_HOST", "127.0.0.1")
     frontend_port: int = int(os.getenv("FRONTEND_PORT", "8050"))
 
