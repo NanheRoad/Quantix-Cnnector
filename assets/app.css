@@ -457,16 +457,40 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.protocol-inline-grid-step-main {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2.2fr) minmax(0, 1fr);
+}
+
+.protocol-inline-grid-parse {
+  grid-template-columns: minmax(0, 4fr) minmax(0, 1fr);
+}
+
 .protocol-field {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
 }
 
 .protocol-field-label {
   font-size: 12px;
   font-weight: 700;
   color: #334155;
+}
+
+.protocol-step-editor .Select-value-label {
+  font-size: 13px;
+}
+
+.protocol-step-editor .Select-value-label,
+.protocol-step-editor .Select--single > .Select-control .Select-value {
+  max-width: 100% !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.protocol-step-editor .qx-input {
+  font-size: 14px;
 }
 
 .protocol-validation-box {
