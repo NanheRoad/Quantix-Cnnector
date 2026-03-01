@@ -24,7 +24,7 @@ class Settings:
 
     # 前端
     frontend_host: str = os.getenv("FRONTEND_HOST", "127.0.0.1")
-    frontend_port: int = int(os.getenv("FRONTEND_PORT", "8050"))
+    frontend_port: int = int(os.getenv("FRONTEND_PORT", "8001"))
 
     # ture表示用模拟数据，false 表示：连不上真实设备就报离线/错误，不再返回随机测试值
     # SIMULATE_ON_CONNECT_FAIL=false

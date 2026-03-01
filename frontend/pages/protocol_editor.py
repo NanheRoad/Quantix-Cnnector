@@ -155,22 +155,28 @@ def layout() -> html.Div:
             html.Div(id="protocols-list", style={"marginBottom": "20px"}),
             html.Div(
                 [
-                    html.H3("创建模板"),
                     html.Div(
                         [
-                            html.Label("编辑模式"),
-                            dcc.RadioItems(
-                                id="protocol-mode",
-                                options=[
-                                    {"label": "JSON 编辑", "value": "json"},
-                                    {"label": "表单配置", "value": "form"},
+                            html.H3("创建模板", className="protocol-create-title"),
+                            html.Div(
+                                [
+                                    html.Label("编辑模式", className="protocol-mode-label"),
+                                    dcc.RadioItems(
+                                        id="protocol-mode",
+                                        options=[
+                                            {"label": "JSON 编辑", "value": "json"},
+                                            {"label": "表单配置", "value": "form"},
+                                        ],
+                                        value="form",
+                                        className="protocol-mode-switch",
+                                        labelClassName="protocol-mode-item",
+                                        inputClassName="protocol-mode-input",
+                                    ),
                                 ],
-                                value="form",
-                                className="protocol-mode-switch",
-                                labelClassName="protocol-mode-item",
-                                inputClassName="protocol-mode-input",
+                                className="protocol-mode-row",
                             ),
-                        ]
+                        ],
+                        className="protocol-create-header",
                     ),
                     html.Div(
                         [
@@ -843,7 +849,7 @@ def layout() -> html.Div:
                         className="protocol-editor-grid",
                     ),
                 ],
-                className="protocol-card",
+                className="protocol-card protocol-create-card",
             ),
             html.Hr(style={"margin": "20px 0"}),
             html.Div(
