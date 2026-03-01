@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -78,3 +78,25 @@ class ExecuteStepRequest(BaseModel):
 class ProtocolTestRequest(BaseModel):
     connection_params: dict[str, Any] = Field(default_factory=dict)
     template_variables: dict[str, Any] = Field(default_factory=dict)
+
+
+class StepTestRequest(BaseModel):
+    connection_params: dict[str, Any] = Field(default_factory=dict)
+    template_variables: dict[str, Any] = Field(default_factory=dict)
+    step_id: str
+    step_context: Literal["setup", "poll", "event"]
+    allow_write: bool = False
+    test_payload: str | None = None
+    previous_steps: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("previous_steps", mode="before")
+    @classmethod
+    def validate_previous_steps(cls, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ValueError("previous_steps 必须是字典")
+        for step_id, step_data in value.items():
+            if not isinstance(step_data, dict):
+                raise ValueError(f"previous_steps['{step_id}'] 必须是字典")
+            if "result" not in step_data:
+                raise ValueError(f"previous_steps['{step_id}'] 必须包含 'result' 键")
+        return value

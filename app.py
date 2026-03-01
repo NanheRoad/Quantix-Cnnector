@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
@@ -170,9 +171,497 @@ PROTOCOL_TEMPLATE_PRESETS: dict[str, dict[str, Any]] = {
     },
 }
 
+WRITE_ACTIONS = {"modbus.write_register", "modbus.write_coil", "mqtt.publish"}
+PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")
+VALID_ACTIONS_BY_PROTOCOL: dict[str, set[str]] = {
+    "modbus_tcp": {
+        "modbus.read_input_registers",
+        "modbus.read_holding_registers",
+        "modbus.write_register",
+        "modbus.write_coil",
+        "delay",
+    },
+    "modbus_rtu": {
+        "modbus.read_input_registers",
+        "modbus.read_holding_registers",
+        "modbus.write_register",
+        "modbus.write_coil",
+        "delay",
+    },
+    "mqtt": {"mqtt.subscribe", "mqtt.on_message", "mqtt.publish", "delay"},
+    "serial": {"serial.send", "serial.receive", "delay"},
+    "tcp": {"tcp.send", "tcp.receive", "delay"},
+}
+
+UI_ACTION_OPTIONS_BY_PROTOCOL: dict[str, list[dict[str, str]]] = {
+    "modbus_tcp": [
+        {"label": "modbus.read_input_registers", "value": "modbus.read_input_registers"},
+        {"label": "modbus.read_holding_registers", "value": "modbus.read_holding_registers"},
+        {"label": "modbus.write_register", "value": "modbus.write_register"},
+        {"label": "modbus.write_coil", "value": "modbus.write_coil"},
+        {"label": "delay", "value": "delay"},
+    ],
+    "modbus_rtu": [
+        {"label": "modbus.read_input_registers", "value": "modbus.read_input_registers"},
+        {"label": "modbus.read_holding_registers", "value": "modbus.read_holding_registers"},
+        {"label": "modbus.write_register", "value": "modbus.write_register"},
+        {"label": "modbus.write_coil", "value": "modbus.write_coil"},
+        {"label": "delay", "value": "delay"},
+    ],
+    "mqtt": [
+        {"label": "mqtt.publish", "value": "mqtt.publish"},
+        {"label": "delay", "value": "delay"},
+    ],
+    "serial": [
+        {"label": "serial.send", "value": "serial.send"},
+        {"label": "serial.receive", "value": "serial.receive"},
+        {"label": "delay", "value": "delay"},
+    ],
+    "tcp": [
+        {"label": "tcp.send", "value": "tcp.send"},
+        {"label": "tcp.receive", "value": "tcp.receive"},
+        {"label": "delay", "value": "delay"},
+    ],
+}
+
+SETUP_ACTION_OPTIONS = [
+    {"label": "mqtt.subscribe", "value": "mqtt.subscribe"},
+    {"label": "delay", "value": "delay"},
+]
+
+TRIGGER_OPTIONS_BY_PROTOCOL: dict[str, list[dict[str, str]]] = {
+    "modbus_tcp": [{"label": "poll", "value": "poll"}, {"label": "manual", "value": "manual"}],
+    "modbus_rtu": [{"label": "poll", "value": "poll"}, {"label": "manual", "value": "manual"}],
+    "mqtt": [{"label": "manual", "value": "manual"}],
+    "serial": [{"label": "poll", "value": "poll"}, {"label": "manual", "value": "manual"}],
+    "tcp": [{"label": "poll", "value": "poll"}, {"label": "manual", "value": "manual"}],
+}
+
+PARSE_TYPE_UI_OPTIONS = [
+    {"label": "none", "value": ""},
+    {"label": "expression", "value": "expression"},
+    {"label": "regex", "value": "regex"},
+]
+
 
 def pretty_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def _safe_json_loads(text: Any, fallback: Any) -> Any:
+    if text is None:
+        return fallback
+    raw = str(text).strip()
+    if not raw:
+        return fallback
+    try:
+        return json.loads(raw)
+    except Exception:
+        return fallback
+
+
+def _is_write_action(action: str) -> bool:
+    return action in WRITE_ACTIONS
+
+
+def _extract_placeholders(value: str) -> list[str]:
+    return PLACEHOLDER_PATTERN.findall(str(value))
+
+
+def _is_valid_placeholder(path: str) -> bool:
+    parts = [part.strip() for part in str(path).split(".")]
+    if not parts:
+        return False
+    return all(bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part)) for part in parts)
+
+
+def _validate_expression_syntax(expression: str) -> bool:
+    try:
+        compile(expression, "<protocol_expression>", "eval")
+        return True
+    except Exception:
+        return False
+
+
+def _validate_regex_syntax(pattern: str) -> bool:
+    try:
+        re.compile(pattern)
+        return True
+    except Exception:
+        return False
+
+
+def _step_to_row(step: dict[str, Any]) -> dict[str, Any]:
+    parse = step.get("parse") if isinstance(step.get("parse"), dict) else {}
+    parse_type = str(parse.get("type") or "")
+    parse_rule = ""
+    parse_group = ""
+    if parse_type == "expression":
+        parse_rule = str(parse.get("expression") or "")
+    elif parse_type == "regex":
+        parse_rule = str(parse.get("pattern") or "")
+        parse_group = str(parse.get("group") or "1")
+    return {
+        "id": str(step.get("id") or ""),
+        "name": str(step.get("name") or ""),
+        "trigger": str(step.get("trigger") or "poll"),
+        "action": str(step.get("action") or ""),
+        "params_json": pretty_json(step.get("params", {})),
+        "parse_type": parse_type,
+        "parse_rule": parse_rule,
+        "parse_group": parse_group,
+    }
+
+
+def _variable_to_row(variable: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": str(variable.get("name") or ""),
+        "type": str(variable.get("type") or "string"),
+        "default": variable.get("default"),
+        "label": str(variable.get("label") or ""),
+    }
+
+
+def _handler_to_fields(handler: dict[str, Any]) -> dict[str, str]:
+    parse = handler.get("parse") if isinstance(handler.get("parse"), dict) else {}
+    parse_type = str(parse.get("type") or "regex")
+    parse_rule = ""
+    parse_group = "1"
+    if parse_type == "expression":
+        parse_rule = str(parse.get("expression") or "")
+    elif parse_type == "regex":
+        parse_rule = str(parse.get("pattern") or "")
+        parse_group = str(parse.get("group") or "1")
+    return {
+        "id": str(handler.get("id") or "handle_message"),
+        "name": str(handler.get("name") or "处理消息"),
+        "action": str(handler.get("action") or "mqtt.on_message"),
+        "parse_type": parse_type,
+        "parse_rule": parse_rule,
+        "parse_group": parse_group,
+    }
+
+
+def _default_step_row(protocol_type: str) -> dict[str, Any]:
+    normalized = str(protocol_type or "modbus_tcp")
+    options = UI_ACTION_OPTIONS_BY_PROTOCOL.get(normalized, UI_ACTION_OPTIONS_BY_PROTOCOL["modbus_tcp"])
+    default_action = options[0]["value"] if options else ""
+    default_trigger = "manual" if normalized == "mqtt" else "poll"
+    return {
+        "id": "",
+        "name": "",
+        "trigger": default_trigger,
+        "action": default_action,
+        "params_json": "{}",
+        "parse_type": "",
+        "parse_rule": "",
+        "parse_group": "1",
+    }
+
+
+def _default_setup_step_row() -> dict[str, Any]:
+    return {
+        "id": "",
+        "name": "",
+        "trigger": "setup",
+        "action": "mqtt.subscribe",
+        "params_json": "{}",
+        "parse_type": "",
+        "parse_rule": "",
+        "parse_group": "1",
+    }
+
+
+def _step_row_from_editor(
+    protocol_type: str,
+    step_id: str,
+    name: str,
+    trigger: str,
+    action: str,
+    params_json: str,
+    parse_type: str,
+    parse_rule: str,
+    parse_group: str,
+) -> dict[str, Any]:
+    fallback = _default_step_row(protocol_type)
+    row = {
+        "id": str(step_id or "").strip(),
+        "name": str(name or "").strip(),
+        "trigger": str(trigger or fallback["trigger"]).strip() or fallback["trigger"],
+        "action": str(action or fallback["action"]).strip() or fallback["action"],
+        "params_json": str(params_json or "{}"),
+        "parse_type": str(parse_type or "").strip(),
+        "parse_rule": str(parse_rule or ""),
+        "parse_group": str(parse_group or "1"),
+    }
+    return row
+
+
+def _default_variable_row() -> dict[str, Any]:
+    return {
+        "name": "",
+        "type": "string",
+        "default": "",
+        "label": "",
+    }
+
+
+def _normalize_variable_default(value: str, var_type: str) -> Any:
+    raw = str(value or "").strip()
+    if raw == "":
+        return ""
+
+    normalized_type = str(var_type or "string")
+    try:
+        if normalized_type == "int":
+            return int(raw)
+        if normalized_type == "float":
+            return float(raw)
+        if normalized_type == "bool":
+            return raw.lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        return raw
+    return raw
+
+
+def _template_to_form_fields(template: dict[str, Any]) -> dict[str, Any]:
+    protocol_type = str(template.get("protocol_type") or "modbus_tcp")
+    variables = template.get("variables", [])
+    steps = template.get("steps", [])
+    setup_steps = template.get("setup_steps", [])
+    message_handler = template.get("message_handler", {}) if isinstance(template.get("message_handler"), dict) else {}
+    output = template.get("output", {})
+
+    return {
+        "variables_data": [_variable_to_row(v) for v in variables if isinstance(v, dict)],
+        "steps_data": [_step_to_row(s) for s in steps if isinstance(s, dict)],
+        "setup_steps_data": [_step_to_row(s) for s in setup_steps if isinstance(s, dict)],
+        "message_fields": _handler_to_fields(message_handler if protocol_type == "mqtt" else {}),
+        "output_weight": str(output.get("weight") or ""),
+        "output_unit": str(output.get("unit") or "kg"),
+    }
+
+
+def _parse_row_step(
+    row: dict[str, Any],
+    protocol_type: str,
+    default_trigger: str,
+) -> tuple[dict[str, Any] | None, list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    step_id = str(row.get("id") or "").strip()
+    name = str(row.get("name") or "").strip() or step_id
+    action = str(row.get("action") or "").strip()
+    trigger = str(row.get("trigger") or default_trigger).strip() or default_trigger
+
+    if not step_id:
+        errors.append("步骤缺少 id")
+    if not action:
+        errors.append(f"步骤 {step_id or '<unknown>'} 缺少 action")
+
+    valid_actions = VALID_ACTIONS_BY_PROTOCOL.get(protocol_type, set())
+    if action and valid_actions and action not in valid_actions:
+        errors.append(f"步骤 {step_id or '<unknown>'} 使用了不支持的 action: {action}")
+
+    params_json = row.get("params_json")
+    params: dict[str, Any] = {}
+    if isinstance(params_json, str) and params_json.strip():
+        try:
+            parsed = json.loads(params_json)
+        except Exception as exc:
+            errors.append(f"步骤 {step_id or '<unknown>'} params JSON 错误: {exc}")
+            parsed = {}
+        if not isinstance(parsed, dict):
+            errors.append(f"步骤 {step_id or '<unknown>'} params 必须是 JSON 对象")
+            parsed = {}
+        params = parsed
+
+    for _, value in params.items():
+        if isinstance(value, str):
+            for placeholder in _extract_placeholders(value):
+                if not _is_valid_placeholder(placeholder):
+                    errors.append(f"步骤 {step_id or '<unknown>'} 存在无效占位符: {placeholder}")
+
+    step: dict[str, Any] = {
+        "id": step_id,
+        "name": name or step_id,
+        "trigger": trigger,
+        "action": action,
+    }
+    if params:
+        step["params"] = params
+
+    parse_type = str(row.get("parse_type") or "").strip()
+    parse_rule = str(row.get("parse_rule") or "")
+    parse_group = str(row.get("parse_group") or "1")
+    if parse_type:
+        parse_cfg: dict[str, Any] = {"type": parse_type}
+        if parse_type == "expression":
+            parse_cfg["expression"] = parse_rule
+            if parse_rule and not _validate_expression_syntax(parse_rule):
+                errors.append(f"步骤 {step_id or '<unknown>'} expression 语法错误")
+        elif parse_type == "regex":
+            parse_cfg["pattern"] = parse_rule
+            if parse_group.strip():
+                try:
+                    parse_cfg["group"] = int(parse_group)
+                except Exception:
+                    errors.append(f"步骤 {step_id or '<unknown>'} regex group 必须是整数")
+            if parse_rule and not _validate_regex_syntax(parse_rule):
+                errors.append(f"步骤 {step_id or '<unknown>'} regex 语法错误")
+        step["parse"] = parse_cfg
+
+    if _is_write_action(action) and trigger != "manual":
+        errors.append(f"步骤 {step_id or '<unknown>'} 的写操作必须使用 trigger=manual")
+
+    if not step_id or not action:
+        return None, errors, warnings
+    return step, errors, warnings
+
+
+def _validate_template_structure(template: dict[str, Any], strict_name: bool = True) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    name_value = str(template.get("name") or "").strip()
+    if not name_value:
+        if strict_name:
+            errors.append("缺少必填字段: name")
+        else:
+            warnings.append("建议填写字段: name")
+
+    for field in ["protocol_type", "output"]:
+        if not template.get(field):
+            errors.append(f"缺少必填字段: {field}")
+
+    protocol_type = str(template.get("protocol_type") or "")
+    if protocol_type == "mqtt":
+        if not template.get("setup_steps"):
+            errors.append("MQTT 协议必须配置 setup_steps")
+        if not isinstance(template.get("message_handler"), dict):
+            errors.append("MQTT 协议必须配置 message_handler")
+        for i, step in enumerate(template.get("steps", []), start=1):
+            if step.get("trigger") != "manual":
+                warnings.append(f"MQTT steps[{i}] 建议只保留 manual 步骤")
+    else:
+        if not template.get("steps"):
+            errors.append(f"{protocol_type or '当前'} 协议必须配置 steps")
+
+    return errors, warnings
+
+
+def _generate_template_from_form(
+    name: str,
+    description: str,
+    protocol_type: str,
+    variables_data: list[dict[str, Any]] | None,
+    steps_data: list[dict[str, Any]] | None,
+    setup_steps_data: list[dict[str, Any]] | None,
+    message_id: str,
+    message_name: str,
+    message_action: str,
+    message_parse_type: str,
+    message_parse_rule: str,
+    message_parse_group: str,
+    output_weight: str,
+    output_unit: str,
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    variables: list[dict[str, Any]] = []
+    for row in variables_data or []:
+        if not isinstance(row, dict):
+            continue
+        var_name = str(row.get("name") or "").strip()
+        if not var_name:
+            continue
+        var_item: dict[str, Any] = {"name": var_name, "type": str(row.get("type") or "string")}
+        if str(row.get("label") or "").strip():
+            var_item["label"] = str(row.get("label"))
+        if row.get("default") is not None and str(row.get("default")) != "":
+            var_item["default"] = row.get("default")
+        variables.append(var_item)
+
+    parsed_steps: list[dict[str, Any]] = []
+    for row in steps_data or []:
+        if not isinstance(row, dict):
+            continue
+        step, step_errors, step_warnings = _parse_row_step(row, protocol_type, "poll")
+        errors.extend(step_errors)
+        warnings.extend(step_warnings)
+        if step:
+            parsed_steps.append(step)
+
+    parsed_setup_steps: list[dict[str, Any]] = []
+    for row in setup_steps_data or []:
+        if not isinstance(row, dict):
+            continue
+        row = dict(row)
+        row["trigger"] = row.get("trigger") or "setup"
+        step, step_errors, step_warnings = _parse_row_step(row, "mqtt", "setup")
+        errors.extend(step_errors)
+        warnings.extend(step_warnings)
+        if step:
+            step["trigger"] = "setup"
+            parsed_setup_steps.append(step)
+
+    template: dict[str, Any] = {
+        "name": name or "",
+        "description": description or "",
+        "protocol_type": protocol_type,
+        "variables": variables,
+        "output": {
+            "weight": output_weight or "",
+            "unit": output_unit or "kg",
+        },
+    }
+
+    if protocol_type == "mqtt":
+        template["setup_steps"] = parsed_setup_steps
+        template["steps"] = [step for step in parsed_steps if step.get("trigger") == "manual"]
+        message_handler: dict[str, Any] = {
+            "id": message_id or "handle_message",
+            "name": message_name or "处理消息",
+            "trigger": "event",
+            "action": message_action or "mqtt.on_message",
+        }
+        if message_parse_type:
+            if message_parse_type == "expression":
+                message_handler["parse"] = {"type": "expression", "expression": message_parse_rule or ""}
+                if message_parse_rule and not _validate_expression_syntax(message_parse_rule):
+                    errors.append("message_handler expression 语法错误")
+            elif message_parse_type == "regex":
+                parse_item: dict[str, Any] = {"type": "regex", "pattern": message_parse_rule or ""}
+                if message_parse_group.strip():
+                    try:
+                        parse_item["group"] = int(message_parse_group)
+                    except Exception:
+                        errors.append("message_handler group 必须是整数")
+                if message_parse_rule and not _validate_regex_syntax(message_parse_rule):
+                    errors.append("message_handler regex 语法错误")
+                message_handler["parse"] = parse_item
+        template["message_handler"] = message_handler
+    else:
+        template["steps"] = parsed_steps
+
+    structure_errors, structure_warnings = _validate_template_structure(template, strict_name=False)
+    errors.extend(structure_errors)
+    warnings.extend(structure_warnings)
+    return template, errors, warnings
+
+
+def _format_validation(errors: list[str], warnings: list[str]) -> str:
+    if not errors and not warnings:
+        return "✅ 验证通过"
+    lines: list[str] = []
+    if errors:
+        lines.append("❌ 错误:")
+        lines.extend(f"- {item}" for item in errors)
+    if warnings:
+        lines.append("⚠️ 警告:")
+        lines.extend(f"- {item}" for item in warnings)
+    return "\n".join(lines)
 
 
 def _backend_health_url() -> str:
@@ -1020,14 +1509,728 @@ def refresh_protocols(
 
 
 @app.callback(
+    Output("protocol-json-input-panel", "style"),
+    Output("protocol-form-input-panel", "style"),
+    Output("protocol-editor-preview", "style"),
+    Output("protocol-editor-grid", "style"),
+    Input("protocol-mode", "value"),
+)
+def switch_protocol_editor_mode(mode: str):
+    current_mode = str(mode or "form")
+    if current_mode == "json":
+        return {"display": "block"}, {"display": "none"}, {"display": "none"}, {"display": "block"}
+    return {"display": "none"}, {"display": "block"}, {"display": "block"}, {}
+
+
+@app.callback(
+    Output("protocol-setup-section", "style"),
+    Output("protocol-message-section", "style"),
+    Input("protocol-type", "value"),
+)
+def switch_protocol_mqtt_sections(protocol_type: str):
+    is_mqtt = str(protocol_type or "") == "mqtt"
+    visible = {"display": "block"}
+    hidden = {"display": "none"}
+    return (visible if is_mqtt else hidden, visible if is_mqtt else hidden)
+
+
+@app.callback(
+    Output("protocol-step-edit-trigger", "options"),
+    Output("protocol-step-edit-action", "options"),
+    Output("protocol-setup-edit-action", "options"),
+    Input("protocol-type", "value"),
+)
+def update_protocol_step_dropdowns(protocol_type: str):
+    normalized = str(protocol_type or "modbus_tcp")
+    main_actions = UI_ACTION_OPTIONS_BY_PROTOCOL.get(normalized, UI_ACTION_OPTIONS_BY_PROTOCOL["modbus_tcp"])
+    main_triggers = TRIGGER_OPTIONS_BY_PROTOCOL.get(normalized, TRIGGER_OPTIONS_BY_PROTOCOL["modbus_tcp"])
+    return main_triggers, main_actions, SETUP_ACTION_OPTIONS
+
+
+@app.callback(
+    Output("protocol-form-message-id", "value"),
+    Output("protocol-form-message-name", "value"),
+    Output("protocol-form-message-action", "value"),
+    Output("protocol-form-message-parse-type", "value"),
+    Output("protocol-form-message-parse-rule", "value"),
+    Output("protocol-form-message-parse-group", "value"),
+    Output("protocol-form-output-weight", "value"),
+    Output("protocol-form-output-unit", "value"),
+    Input("protocol-type", "value"),
+    State("protocol-form-message-id", "value"),
+    State("protocol-form-message-name", "value"),
+    State("protocol-form-message-action", "value"),
+    State("protocol-form-message-parse-type", "value"),
+    State("protocol-form-message-parse-rule", "value"),
+    State("protocol-form-message-parse-group", "value"),
+    State("protocol-form-output-weight", "value"),
+    State("protocol-form-output-unit", "value"),
+    prevent_initial_call=False,
+)
+def manage_protocol_form_inputs(
+    protocol_type: str,
+    message_id: str,
+    message_name: str,
+    message_action: str,
+    message_parse_type: str,
+    message_parse_rule: str,
+    message_parse_group: str,
+    output_weight: str,
+    output_unit: str,
+):
+    normalized = str(protocol_type or "modbus_tcp")
+    preset = deepcopy(PROTOCOL_TEMPLATE_PRESETS.get(normalized, PROTOCOL_TEMPLATE_PRESETS["modbus_tcp"]))
+    fields = _template_to_form_fields(preset)
+    message_fields = fields["message_fields"]
+    return (
+        message_fields["id"],
+        message_fields["name"],
+        message_fields["action"],
+        message_fields["parse_type"],
+        message_fields["parse_rule"],
+        message_fields["parse_group"],
+        fields["output_weight"],
+        fields["output_unit"],
+    )
+
+
+@app.callback(
+    Output("protocol-form-variables-store", "data"),
+    Output("protocol-variables-selected-index", "data"),
+    Input("protocol-type", "value"),
+    Input("protocol-add-variable-btn", "n_clicks"),
+    Input("protocol-variable-save-btn", "n_clicks"),
+    Input("protocol-variable-delete-btn", "n_clicks"),
+    Input("protocol-variable-up-btn", "n_clicks"),
+    Input("protocol-variable-down-btn", "n_clicks"),
+    Input({"type": "protocol-variable-select-btn", "index": ALL}, "n_clicks"),
+    State("protocol-form-variables-store", "data"),
+    State("protocol-variables-selected-index", "data"),
+    State("protocol-variable-edit-name", "value"),
+    State("protocol-variable-edit-type", "value"),
+    State("protocol-variable-edit-default", "value"),
+    State("protocol-variable-edit-label", "value"),
+    prevent_initial_call=False,
+)
+def manage_protocol_variables_workspace(
+    protocol_type: str,
+    _add_variable_clicks: int,
+    _save_clicks: int,
+    _delete_clicks: int,
+    _up_clicks: int,
+    _down_clicks: int,
+    _select_clicks: list[int],
+    variables_data: Any,
+    selected_index: Any,
+    var_name: str,
+    var_type: str,
+    var_default: str,
+    var_label: str,
+):
+    variables = list(variables_data or [])
+    try:
+        selected = int(selected_index) if selected_index is not None else None
+    except Exception:
+        selected = None
+
+    ctx = dash.callback_context
+    triggered_raw = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else "protocol-type"
+
+    if triggered_raw == "protocol-type" or not ctx.triggered:
+        normalized = str(protocol_type or "modbus_tcp")
+        preset = deepcopy(PROTOCOL_TEMPLATE_PRESETS.get(normalized, PROTOCOL_TEMPLATE_PRESETS["modbus_tcp"]))
+        fields = _template_to_form_fields(preset)
+        preset_vars = fields["variables_data"]
+        first = 0 if preset_vars else None
+        return preset_vars, first
+
+    if triggered_raw == "protocol-add-variable-btn":
+        variables.append(_default_variable_row())
+        return variables, len(variables) - 1
+
+    if triggered_raw.startswith("{"):
+        try:
+            trigger_dict = json.loads(triggered_raw)
+            if trigger_dict.get("type") == "protocol-variable-select-btn":
+                index = int(trigger_dict.get("index"))
+                if 0 <= index < len(variables):
+                    return variables, index
+        except Exception:
+            pass
+        raise PreventUpdate
+
+    if triggered_raw == "protocol-variable-save-btn":
+        row = {
+            "name": str(var_name or "").strip(),
+            "type": str(var_type or "string"),
+            "default": _normalize_variable_default(str(var_default or ""), str(var_type or "string")),
+            "label": str(var_label or "").strip(),
+        }
+        if selected is None or selected < 0 or selected >= len(variables):
+            variables.append(row)
+            return variables, len(variables) - 1
+        variables[selected] = row
+        return variables, selected
+
+    if triggered_raw == "protocol-variable-delete-btn":
+        if selected is None or selected < 0 or selected >= len(variables):
+            raise PreventUpdate
+        variables.pop(selected)
+        if not variables:
+            return [], None
+        return variables, min(selected, len(variables) - 1)
+
+    if triggered_raw == "protocol-variable-up-btn":
+        if selected is None or selected <= 0 or selected >= len(variables):
+            raise PreventUpdate
+        variables[selected - 1], variables[selected] = variables[selected], variables[selected - 1]
+        return variables, selected - 1
+
+    if triggered_raw == "protocol-variable-down-btn":
+        if selected is None or selected < 0 or selected >= len(variables) - 1:
+            raise PreventUpdate
+        variables[selected + 1], variables[selected] = variables[selected], variables[selected + 1]
+        return variables, selected + 1
+
+    raise PreventUpdate
+
+
+@app.callback(
+    Output("protocol-variable-edit-name", "value"),
+    Output("protocol-variable-edit-type", "value"),
+    Output("protocol-variable-edit-default", "value"),
+    Output("protocol-variable-edit-label", "value"),
+    Input("protocol-form-variables-store", "data"),
+    Input("protocol-variables-selected-index", "data"),
+)
+def load_selected_variable_editor(variables_data: Any, selected_index: Any):
+    variables = list(variables_data or [])
+    try:
+        selected = int(selected_index) if selected_index is not None else None
+    except Exception:
+        selected = None
+
+    if selected is not None and 0 <= selected < len(variables):
+        row = variables[selected]
+        return (
+            str(row.get("name") or ""),
+            str(row.get("type") or "string"),
+            str(row.get("default") or ""),
+            str(row.get("label") or ""),
+        )
+    return "", "string", "", ""
+
+
+@app.callback(
+    Output("protocol-variables-list", "children"),
+    Input("protocol-form-variables-store", "data"),
+    Input("protocol-variables-selected-index", "data"),
+)
+def render_protocol_variables_list(variables_data: Any, selected_index: Any):
+    variables = list(variables_data or [])
+    try:
+        selected = int(selected_index) if selected_index is not None else None
+    except Exception:
+        selected = None
+
+    if not variables:
+        return html.Div("暂无变量，点击“+ 添加变量”后在下方编辑。", className="protocol-help-text")
+
+    cards: list[html.Button] = []
+    for index, row in enumerate(variables):
+        is_active = index == selected
+        cards.append(
+            html.Button(
+                [
+                    html.Span(
+                        [
+                            html.Span(str(row.get("name") or f"var_{index+1}"), className="protocol-step-item-id"),
+                            html.Span(
+                                f"{row.get('type') or 'string'} | default={row.get('default') if row.get('default') is not None else ''}",
+                                className="protocol-step-item-meta",
+                            ),
+                        ],
+                        className="protocol-step-item-main",
+                    ),
+                    html.Span(str(row.get("label") or "-"), className="protocol-step-item-trigger"),
+                ],
+                id={"type": "protocol-variable-select-btn", "index": index},
+                n_clicks=0,
+                className="protocol-step-item active" if is_active else "protocol-step-item",
+            )
+        )
+    return cards
+
+
+@app.callback(
+    Output("protocol-form-steps-store", "data"),
+    Output("protocol-steps-selected-index", "data"),
+    Input("protocol-type", "value"),
+    Input("protocol-add-step-btn", "n_clicks"),
+    Input("protocol-step-save-btn", "n_clicks"),
+    Input("protocol-step-delete-btn", "n_clicks"),
+    Input("protocol-step-up-btn", "n_clicks"),
+    Input("protocol-step-down-btn", "n_clicks"),
+    Input({"type": "protocol-step-select-btn", "index": ALL}, "n_clicks"),
+    State("protocol-form-steps-store", "data"),
+    State("protocol-steps-selected-index", "data"),
+    State("protocol-step-edit-id", "value"),
+    State("protocol-step-edit-name", "value"),
+    State("protocol-step-edit-trigger", "value"),
+    State("protocol-step-edit-action", "value"),
+    State("protocol-step-edit-params-json", "value"),
+    State("protocol-step-edit-parse-type", "value"),
+    State("protocol-step-edit-parse-rule", "value"),
+    State("protocol-step-edit-parse-group", "value"),
+    prevent_initial_call=False,
+)
+def manage_protocol_steps_workspace(
+    protocol_type: str,
+    _add_step_clicks: int,
+    _save_clicks: int,
+    _delete_clicks: int,
+    _up_clicks: int,
+    _down_clicks: int,
+    _select_clicks: list[int],
+    steps_data: Any,
+    selected_index: Any,
+    step_id: str,
+    step_name: str,
+    trigger: str,
+    action: str,
+    params_json: str,
+    parse_type: str,
+    parse_rule: str,
+    parse_group: str,
+):
+    steps = list(steps_data or [])
+    try:
+        selected = int(selected_index) if selected_index is not None else None
+    except Exception:
+        selected = None
+
+    ctx = dash.callback_context
+    triggered_raw = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else "protocol-type"
+
+    if triggered_raw == "protocol-type" or not ctx.triggered:
+        normalized = str(protocol_type or "modbus_tcp")
+        preset = deepcopy(PROTOCOL_TEMPLATE_PRESETS.get(normalized, PROTOCOL_TEMPLATE_PRESETS["modbus_tcp"]))
+        fields = _template_to_form_fields(preset)
+        preset_steps = fields["steps_data"]
+        first = 0 if preset_steps else None
+        return preset_steps, first
+
+    if triggered_raw == "protocol-add-step-btn":
+        steps.append(_default_step_row(protocol_type))
+        return steps, len(steps) - 1
+
+    if triggered_raw.startswith("{"):
+        try:
+            trigger_dict = json.loads(triggered_raw)
+            if trigger_dict.get("type") == "protocol-step-select-btn":
+                index = int(trigger_dict.get("index"))
+                if 0 <= index < len(steps):
+                    return steps, index
+        except Exception:
+            pass
+        raise PreventUpdate
+
+    if triggered_raw == "protocol-step-save-btn":
+        row = _step_row_from_editor(
+            protocol_type=protocol_type,
+            step_id=step_id,
+            name=step_name,
+            trigger=trigger,
+            action=action,
+            params_json=params_json,
+            parse_type=parse_type,
+            parse_rule=parse_rule,
+            parse_group=parse_group,
+        )
+        if selected is None or selected < 0 or selected >= len(steps):
+            steps.append(row)
+            return steps, len(steps) - 1
+        steps[selected] = row
+        return steps, selected
+
+    if triggered_raw == "protocol-step-delete-btn":
+        if selected is None or selected < 0 or selected >= len(steps):
+            raise PreventUpdate
+        steps.pop(selected)
+        if not steps:
+            return [], None
+        return steps, min(selected, len(steps) - 1)
+
+    if triggered_raw == "protocol-step-up-btn":
+        if selected is None or selected <= 0 or selected >= len(steps):
+            raise PreventUpdate
+        steps[selected - 1], steps[selected] = steps[selected], steps[selected - 1]
+        return steps, selected - 1
+
+    if triggered_raw == "protocol-step-down-btn":
+        if selected is None or selected < 0 or selected >= len(steps) - 1:
+            raise PreventUpdate
+        steps[selected + 1], steps[selected] = steps[selected], steps[selected + 1]
+        return steps, selected + 1
+
+    raise PreventUpdate
+
+
+@app.callback(
+    Output("protocol-step-edit-id", "value"),
+    Output("protocol-step-edit-name", "value"),
+    Output("protocol-step-edit-trigger", "value"),
+    Output("protocol-step-edit-action", "value"),
+    Output("protocol-step-edit-params-json", "value"),
+    Output("protocol-step-edit-parse-type", "value"),
+    Output("protocol-step-edit-parse-rule", "value"),
+    Output("protocol-step-edit-parse-group", "value"),
+    Input("protocol-form-steps-store", "data"),
+    Input("protocol-steps-selected-index", "data"),
+    State("protocol-type", "value"),
+)
+def load_selected_step_editor(steps_data: Any, selected_index: Any, protocol_type: str):
+    steps = list(steps_data or [])
+    try:
+        selected = int(selected_index) if selected_index is not None else None
+    except Exception:
+        selected = None
+
+    if selected is not None and 0 <= selected < len(steps):
+        row = steps[selected]
+        return (
+            str(row.get("id") or ""),
+            str(row.get("name") or ""),
+            str(row.get("trigger") or _default_step_row(protocol_type)["trigger"]),
+            str(row.get("action") or _default_step_row(protocol_type)["action"]),
+            str(row.get("params_json") or "{}"),
+            str(row.get("parse_type") or ""),
+            str(row.get("parse_rule") or ""),
+            str(row.get("parse_group") or "1"),
+        )
+
+    default = _default_step_row(protocol_type)
+    return (
+        default["id"],
+        default["name"],
+        default["trigger"],
+        default["action"],
+        default["params_json"],
+        default["parse_type"],
+        default["parse_rule"],
+        default["parse_group"],
+    )
+
+
+@app.callback(
+    Output("protocol-steps-list", "children"),
+    Input("protocol-form-steps-store", "data"),
+    Input("protocol-steps-selected-index", "data"),
+)
+def render_protocol_steps_list(steps_data: Any, selected_index: Any):
+    steps = list(steps_data or [])
+    try:
+        selected = int(selected_index) if selected_index is not None else None
+    except Exception:
+        selected = None
+
+    if not steps:
+        return html.Div("暂无步骤，点击“+ 添加步骤”后在下方编辑。", className="protocol-help-text")
+
+    cards: list[html.Button] = []
+    for index, row in enumerate(steps):
+        is_active = index == selected
+        cards.append(
+            html.Button(
+                [
+                    html.Span(
+                        [
+                            html.Span(str(row.get("id") or f"step_{index+1}"), className="protocol-step-item-id"),
+                            html.Span(
+                                f"{row.get('name') or '-'} | {row.get('action') or '-'}",
+                                className="protocol-step-item-meta",
+                            ),
+                        ],
+                        className="protocol-step-item-main",
+                    ),
+                    html.Span(str(row.get("trigger") or "poll"), className="protocol-step-item-trigger"),
+                ],
+                id={"type": "protocol-step-select-btn", "index": index},
+                n_clicks=0,
+                className="protocol-step-item active" if is_active else "protocol-step-item",
+            )
+        )
+    return cards
+
+
+@app.callback(
+    Output("protocol-form-setup-steps-store", "data"),
+    Output("protocol-setup-selected-index", "data"),
+    Input("protocol-type", "value"),
+    Input("protocol-add-setup-step-btn", "n_clicks"),
+    Input("protocol-setup-save-btn", "n_clicks"),
+    Input("protocol-setup-delete-btn", "n_clicks"),
+    Input("protocol-setup-up-btn", "n_clicks"),
+    Input("protocol-setup-down-btn", "n_clicks"),
+    Input({"type": "protocol-setup-select-btn", "index": ALL}, "n_clicks"),
+    State("protocol-form-setup-steps-store", "data"),
+    State("protocol-setup-selected-index", "data"),
+    State("protocol-setup-edit-id", "value"),
+    State("protocol-setup-edit-name", "value"),
+    State("protocol-setup-edit-action", "value"),
+    State("protocol-setup-edit-params-json", "value"),
+    State("protocol-setup-edit-parse-type", "value"),
+    State("protocol-setup-edit-parse-rule", "value"),
+    State("protocol-setup-edit-parse-group", "value"),
+    prevent_initial_call=False,
+)
+def manage_protocol_setup_steps_workspace(
+    protocol_type: str,
+    _add_setup_clicks: int,
+    _save_clicks: int,
+    _delete_clicks: int,
+    _up_clicks: int,
+    _down_clicks: int,
+    _select_clicks: list[int],
+    setup_steps_data: Any,
+    selected_index: Any,
+    step_id: str,
+    step_name: str,
+    action: str,
+    params_json: str,
+    parse_type: str,
+    parse_rule: str,
+    parse_group: str,
+):
+    steps = list(setup_steps_data or [])
+    try:
+        selected = int(selected_index) if selected_index is not None else None
+    except Exception:
+        selected = None
+
+    ctx = dash.callback_context
+    triggered_raw = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else "protocol-type"
+
+    if triggered_raw == "protocol-type" or not ctx.triggered:
+        normalized = str(protocol_type or "modbus_tcp")
+        preset = deepcopy(PROTOCOL_TEMPLATE_PRESETS.get(normalized, PROTOCOL_TEMPLATE_PRESETS["modbus_tcp"]))
+        fields = _template_to_form_fields(preset)
+        preset_steps = fields["setup_steps_data"]
+        first = 0 if preset_steps else None
+        return preset_steps, first
+
+    if triggered_raw == "protocol-add-setup-step-btn":
+        steps.append(_default_setup_step_row())
+        return steps, len(steps) - 1
+
+    if triggered_raw.startswith("{"):
+        try:
+            trigger_dict = json.loads(triggered_raw)
+            if trigger_dict.get("type") == "protocol-setup-select-btn":
+                index = int(trigger_dict.get("index"))
+                if 0 <= index < len(steps):
+                    return steps, index
+        except Exception:
+            pass
+        raise PreventUpdate
+
+    if triggered_raw == "protocol-setup-save-btn":
+        row = _step_row_from_editor(
+            protocol_type="mqtt",
+            step_id=step_id,
+            name=step_name,
+            trigger="setup",
+            action=action,
+            params_json=params_json,
+            parse_type=parse_type,
+            parse_rule=parse_rule,
+            parse_group=parse_group,
+        )
+        row["trigger"] = "setup"
+        if selected is None or selected < 0 or selected >= len(steps):
+            steps.append(row)
+            return steps, len(steps) - 1
+        steps[selected] = row
+        return steps, selected
+
+    if triggered_raw == "protocol-setup-delete-btn":
+        if selected is None or selected < 0 or selected >= len(steps):
+            raise PreventUpdate
+        steps.pop(selected)
+        if not steps:
+            return [], None
+        return steps, min(selected, len(steps) - 1)
+
+    if triggered_raw == "protocol-setup-up-btn":
+        if selected is None or selected <= 0 or selected >= len(steps):
+            raise PreventUpdate
+        steps[selected - 1], steps[selected] = steps[selected], steps[selected - 1]
+        return steps, selected - 1
+
+    if triggered_raw == "protocol-setup-down-btn":
+        if selected is None or selected < 0 or selected >= len(steps) - 1:
+            raise PreventUpdate
+        steps[selected + 1], steps[selected] = steps[selected], steps[selected + 1]
+        return steps, selected + 1
+
+    raise PreventUpdate
+
+
+@app.callback(
+    Output("protocol-setup-edit-id", "value"),
+    Output("protocol-setup-edit-name", "value"),
+    Output("protocol-setup-edit-action", "value"),
+    Output("protocol-setup-edit-params-json", "value"),
+    Output("protocol-setup-edit-parse-type", "value"),
+    Output("protocol-setup-edit-parse-rule", "value"),
+    Output("protocol-setup-edit-parse-group", "value"),
+    Input("protocol-form-setup-steps-store", "data"),
+    Input("protocol-setup-selected-index", "data"),
+)
+def load_selected_setup_editor(setup_steps_data: Any, selected_index: Any):
+    steps = list(setup_steps_data or [])
+    try:
+        selected = int(selected_index) if selected_index is not None else None
+    except Exception:
+        selected = None
+
+    if selected is not None and 0 <= selected < len(steps):
+        row = steps[selected]
+        return (
+            str(row.get("id") or ""),
+            str(row.get("name") or ""),
+            str(row.get("action") or "mqtt.subscribe"),
+            str(row.get("params_json") or "{}"),
+            str(row.get("parse_type") or ""),
+            str(row.get("parse_rule") or ""),
+            str(row.get("parse_group") or "1"),
+        )
+    default = _default_setup_step_row()
+    return (
+        default["id"],
+        default["name"],
+        default["action"],
+        default["params_json"],
+        default["parse_type"],
+        default["parse_rule"],
+        default["parse_group"],
+    )
+
+
+@app.callback(
+    Output("protocol-setup-steps-list", "children"),
+    Input("protocol-form-setup-steps-store", "data"),
+    Input("protocol-setup-selected-index", "data"),
+)
+def render_protocol_setup_steps_list(setup_steps_data: Any, selected_index: Any):
+    steps = list(setup_steps_data or [])
+    try:
+        selected = int(selected_index) if selected_index is not None else None
+    except Exception:
+        selected = None
+
+    if not steps:
+        return html.Div("暂无 setup 步骤，点击“+ 添加 setup”后在下方编辑。", className="protocol-help-text")
+
+    cards: list[html.Button] = []
+    for index, row in enumerate(steps):
+        is_active = index == selected
+        cards.append(
+            html.Button(
+                [
+                    html.Span(
+                        [
+                            html.Span(str(row.get("id") or f"setup_{index+1}"), className="protocol-step-item-id"),
+                            html.Span(
+                                f"{row.get('name') or '-'} | {row.get('action') or '-'}",
+                                className="protocol-step-item-meta",
+                            ),
+                        ],
+                        className="protocol-step-item-main",
+                    ),
+                    html.Span("setup", className="protocol-step-item-trigger"),
+                ],
+                id={"type": "protocol-setup-select-btn", "index": index},
+                n_clicks=0,
+                className="protocol-step-item active" if is_active else "protocol-step-item",
+            )
+        )
+    return cards
+
+
+@app.callback(
+    Output("protocol-generated-template-store", "data"),
+    Output("protocol-json-preview", "value"),
+    Output("protocol-json-validation-status", "children"),
+    Output("protocol-form-validation", "children"),
+    Input("protocol-name", "value"),
+    Input("protocol-desc", "value"),
+    Input("protocol-type", "value"),
+    Input("protocol-form-variables-store", "data"),
+    Input("protocol-form-steps-store", "data"),
+    Input("protocol-form-setup-steps-store", "data"),
+    Input("protocol-form-message-id", "value"),
+    Input("protocol-form-message-name", "value"),
+    Input("protocol-form-message-action", "value"),
+    Input("protocol-form-message-parse-type", "value"),
+    Input("protocol-form-message-parse-rule", "value"),
+    Input("protocol-form-message-parse-group", "value"),
+    Input("protocol-form-output-weight", "value"),
+    Input("protocol-form-output-unit", "value"),
+)
+def generate_protocol_preview(
+    name: str,
+    description: str,
+    protocol_type: str,
+    variables_data: Any,
+    steps_data: Any,
+    setup_steps_data: Any,
+    message_id: str,
+    message_name: str,
+    message_action: str,
+    message_parse_type: str,
+    message_parse_rule: str,
+    message_parse_group: str,
+    output_weight: str,
+    output_unit: str,
+):
+    template, errors, warnings = _generate_template_from_form(
+        name=str(name or ""),
+        description=str(description or ""),
+        protocol_type=str(protocol_type or "modbus_tcp"),
+        variables_data=variables_data if isinstance(variables_data, list) else [],
+        steps_data=steps_data if isinstance(steps_data, list) else [],
+        setup_steps_data=setup_steps_data if isinstance(setup_steps_data, list) else [],
+        message_id=str(message_id or ""),
+        message_name=str(message_name or ""),
+        message_action=str(message_action or ""),
+        message_parse_type=str(message_parse_type or ""),
+        message_parse_rule=str(message_parse_rule or ""),
+        message_parse_group=str(message_parse_group or ""),
+        output_weight=str(output_weight or ""),
+        output_unit=str(output_unit or "kg"),
+    )
+    validation_text = _format_validation(errors, warnings)
+    return template, pretty_json(template), validation_text, validation_text
+
+
+@app.callback(
     Output("protocol-template-json", "value"),
     Output("protocol-template-help", "children"),
     Output("protocol-preset-last-type", "data"),
     Input("protocol-type", "value"),
+    Input("protocol-mode", "value"),
+    Input("protocol-generated-template-store", "data"),
     State("protocol-template-json", "value"),
     State("protocol-preset-last-type", "data"),
 )
-def load_protocol_preset(protocol_type: str, current_json: str | None, last_type: str | None):
+def load_protocol_preset(
+    protocol_type: str,
+    mode: str,
+    generated_template: Any,
+    current_json: str | None,
+    last_type: str | None,
+):
     normalized = str(protocol_type or "modbus_tcp")
     preset = deepcopy(PROTOCOL_TEMPLATE_PRESETS.get(normalized, PROTOCOL_TEMPLATE_PRESETS["modbus_tcp"]))
 
@@ -1036,14 +2239,26 @@ def load_protocol_preset(protocol_type: str, current_json: str | None, last_type
     else:
         text = "轮询协议模板建议使用 steps + trigger=poll；写操作步骤建议设置 trigger=manual。"
 
-    # Keep user-edited JSON when returning to same tab/type.
-    # Reset to preset only when protocol type actually changes.
+    ctx = dash.callback_context
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else "protocol-type"
     current_text = str(current_json or "").strip()
     previous_type = str(last_type or "").strip()
 
+    # When switching back to JSON mode, sync the latest generated form template.
+    if triggered_id == "protocol-mode" and str(mode or "form") == "json":
+        if isinstance(generated_template, dict) and generated_template:
+            return pretty_json(generated_template), text, normalized
+        return no_update, text, normalized
+
+    # In form mode, do not overwrite user JSON text.
+    if str(mode or "form") == "form":
+        return no_update, text, normalized
+
+    # Keep user-edited JSON when type unchanged.
     if previous_type and previous_type == normalized:
         return no_update, text, normalized
 
+    # Keep existing JSON on first load if user already pasted content.
     if (not previous_type) and current_text and current_text != "{}":
         return no_update, text, normalized
 
@@ -1056,19 +2271,43 @@ def load_protocol_preset(protocol_type: str, current_json: str | None, last_type
     State("protocol-name", "value"),
     State("protocol-desc", "value"),
     State("protocol-type", "value"),
+    State("protocol-mode", "value"),
+    State("protocol-generated-template-store", "data"),
     State("protocol-template-json", "value"),
     prevent_initial_call=True,
 )
-def create_protocol(_n: int, name: str, description: str, protocol_type: str, template_json: str):
+def create_protocol(
+    _n: int,
+    name: str,
+    description: str,
+    protocol_type: str,
+    mode: str,
+    generated_template: Any,
+    template_json: str,
+):
     try:
-        template = json.loads(template_json or "{}")
+        if not str(name or "").strip():
+            return "创建失败: 模板名称不能为空"
+
+        normalized_mode = str(mode or "form")
+        if normalized_mode == "form":
+            template = generated_template if isinstance(generated_template, dict) else {}
+            if not template:
+                return "创建失败: 表单尚未生成有效模板"
+        else:
+            template = json.loads(template_json or "{}")
+
         template["name"] = template.get("name") or name
         template["protocol_type"] = protocol_type
 
+        errors, _warnings = _validate_template_structure(template, strict_name=True)
+        if errors:
+            return "创建失败: 模板校验未通过\n" + "\n".join(f"- {item}" for item in errors)
+
         payload = {
-            "name": name,
-            "description": description,
-            "protocol_type": protocol_type,
+            "name": str(name),
+            "description": str(description or ""),
+            "protocol_type": str(protocol_type),
             "template": template,
             "is_system": False,
         }
@@ -1101,6 +2340,119 @@ def load_protocol_for_edit(protocol_id: Any):
         str(protocol.get("protocol_type") or "modbus_tcp"),
         pretty_json(template),
     )
+
+
+@app.callback(
+    Output("protocol-step-test-id", "options"),
+    Output("protocol-step-test-id", "value"),
+    Input("protocol-edit-id", "value"),
+    Input("protocol-step-test-context", "value"),
+)
+def load_step_test_options(protocol_id: Any, step_context: str):
+    if not protocol_id:
+        return [], None
+
+    try:
+        protocol = api_request("GET", f"/api/protocols/{int(protocol_id)}")
+    except Exception:
+        return [], None
+
+    template = protocol.get("template", {})
+    context = str(step_context or "poll")
+    options: list[dict[str, Any]] = []
+    if context == "setup":
+        for step in template.get("setup_steps", []):
+            if not isinstance(step, dict):
+                continue
+            step_id = str(step.get("id") or "")
+            if not step_id:
+                continue
+            options.append(
+                {
+                    "label": f"{step_id} ({step.get('action', '-')})",
+                    "value": step_id,
+                }
+            )
+    elif context == "event":
+        handler = template.get("message_handler", {})
+        if isinstance(handler, dict):
+            step_id = str(handler.get("id") or "")
+            if step_id:
+                options.append(
+                    {
+                        "label": f"{step_id} ({handler.get('action', '-')})",
+                        "value": step_id,
+                    }
+                )
+    else:
+        for step in template.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            if step.get("trigger", "poll") != "poll":
+                continue
+            step_id = str(step.get("id") or "")
+            if not step_id:
+                continue
+            options.append(
+                {
+                    "label": f"{step_id} ({step.get('action', '-')})",
+                    "value": step_id,
+                }
+            )
+
+    first = options[0]["value"] if options else None
+    return options, first
+
+
+@app.callback(
+    Output("protocol-step-test-result", "children"),
+    Input("protocol-step-test-btn", "n_clicks"),
+    State("protocol-edit-id", "value"),
+    State("protocol-step-test-context", "value"),
+    State("protocol-step-test-id", "value"),
+    State("protocol-step-test-conn-json", "value"),
+    State("protocol-step-test-vars-json", "value"),
+    State("protocol-step-test-payload", "value"),
+    State("protocol-step-test-allow-write", "value"),
+    prevent_initial_call=True,
+)
+def run_protocol_step_test(
+    _n_clicks: int,
+    protocol_id: Any,
+    step_context: str,
+    step_id: str,
+    conn_json: str,
+    vars_json: str,
+    test_payload: str,
+    allow_write_flags: list[str] | None,
+):
+    if not protocol_id:
+        return "请先在“编辑或删除模板”中选择模板。"
+    if not step_id:
+        return "请选择要测试的步骤。"
+
+    try:
+        connection_params = _safe_json_loads(conn_json, {})
+        template_variables = _safe_json_loads(vars_json, {})
+        if not isinstance(connection_params, dict):
+            return "连接参数必须是 JSON 对象。"
+        if not isinstance(template_variables, dict):
+            return "变量参数必须是 JSON 对象。"
+
+        payload: dict[str, Any] = {
+            "connection_params": connection_params,
+            "template_variables": template_variables,
+            "step_id": str(step_id),
+            "step_context": str(step_context or "poll"),
+            "allow_write": "allow" in (allow_write_flags or []),
+        }
+        if str(step_context or "") == "event":
+            payload["test_payload"] = str(test_payload or "")
+
+        result = api_request("POST", f"/api/protocols/{int(protocol_id)}/test-step", json=payload)
+        return pretty_json(result)
+    except Exception as exc:
+        return f"单步测试失败: {exc}"
 
 
 @app.callback(

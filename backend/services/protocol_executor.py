@@ -126,6 +126,22 @@ class ProtocolExecutor:
         output = template.get("output", {})
         return self._resolve_value(output, context)
 
+    async def execute_one_step(
+        self,
+        driver,
+        step: dict[str, Any],
+        context: dict[str, Any],
+        params_override: dict[str, Any] | None = None,
+        skip_driver: bool = False,
+    ) -> Any:
+        return await self._execute_step(
+            driver=driver,
+            step=step,
+            context=context,
+            params_override=params_override,
+            skip_driver=skip_driver,
+        )
+
     async def _execute_step(
         self,
         driver,
